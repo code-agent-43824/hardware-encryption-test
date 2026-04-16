@@ -6,10 +6,13 @@ import platform
 CK_RV = ctypes.c_ulong
 CK_VOID_PTR = ctypes.c_void_p
 CK_ULONG = ctypes.c_ulong
-FUNCTYPE = ctypes.WINFUNCTYPE if platform.system() == "Windows" else ctypes.CFUNCTYPE
+PACK = 1 if platform.system() == "Windows" else 0
+FUNCTYPE = ctypes.CFUNCTYPE
 
 
 class CK_VERSION(ctypes.Structure):
+    if PACK:
+        _pack_ = PACK
     _fields_ = [
         ("major", ctypes.c_ubyte),
         ("minor", ctypes.c_ubyte),
@@ -17,6 +20,8 @@ class CK_VERSION(ctypes.Structure):
 
 
 class CK_INFO(ctypes.Structure):
+    if PACK:
+        _pack_ = PACK
     _fields_ = [
         ("cryptokiVersion", CK_VERSION),
         ("manufacturerID", ctypes.c_char * 32),
@@ -27,6 +32,8 @@ class CK_INFO(ctypes.Structure):
 
 
 class CK_FUNCTION_LIST(ctypes.Structure):
+    if PACK:
+        _pack_ = PACK
     pass
 
 
