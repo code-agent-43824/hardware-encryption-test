@@ -6,6 +6,10 @@ import platform
 CK_RV = ctypes.c_ulong
 CK_VOID_PTR = ctypes.c_void_p
 CK_ULONG = ctypes.c_ulong
+CK_FLAGS = CK_ULONG
+CK_C_INITIALIZE_ARGS_PTR = CK_VOID_PTR
+CKF_OS_LOCKING_OK = 0x00000002
+FUNCTYPE = ctypes.WINFUNCTYPE if platform.system() == "Windows" else ctypes.CFUNCTYPE
 
 
 class CK_VERSION(ctypes.Structure):
@@ -25,22 +29,33 @@ class CK_INFO(ctypes.Structure):
     ]
 
 
-C_Initialize_Type = ctypes.CFUNCTYPE(CK_RV, CK_VOID_PTR)
-C_Finalize_Type = ctypes.CFUNCTYPE(CK_RV, CK_VOID_PTR)
-C_GetInfo_Type = ctypes.CFUNCTYPE(CK_RV, ctypes.POINTER(CK_INFO))
-
-
-class CK_FUNCTION_LIST(ctypes.Structure):
+class CK_C_INITIALIZE_ARGS(ctypes.Structure):
     _fields_ = [
-        ("version", CK_VERSION),
-        ("C_Initialize", C_Initialize_Type),
-        ("C_Finalize", C_Finalize_Type),
-        ("C_GetInfo", C_GetInfo_Type),
+        ("CreateMutex", CK_VOID_PTR),
+        ("DestroyMutex", CK_VOID_PTR),
+        ("LockMutex", CK_VOID_PTR),
+        ("UnlockMutex", CK_VOID_PTR),
+        ("flags", CK_FLAGS),
+        ("pReserved", CK_VOID_PTR),
     ]
 
 
+class CK_FUNCTION_LIST(ctypes.Structure):
+    pass
+
+
 CK_FUNCTION_LIST_PTR = ctypes.POINTER(CK_FUNCTION_LIST)
-C_GetFunctionList_Type = ctypes.CFUNCTYPE(CK_RV, ctypes.POINTER(CK_FUNCTION_LIST_PTR))
+C_Initialize_Type = FUNCTYPE(CK_RV, CK_C_INITIALIZE_ARGS_PTR)
+C_Finalize_Type = FUNCTYPE(CK_RV, CK_VOID_PTR)
+C_GetInfo_Type = FUNCTYPE(CK_RV, ctypes.POINTER(CK_INFO))
+
+
+CK_FUNCTION_LIST._fields_ = [
+    ("version", CK_VERSION),
+    ("C_Initialize", C_Initialize_Type),
+    ("C_Finalize", C_Finalize_Type),
+    ("C_GetInfo", C_GetInfo_Type),
+]
 
 
 CKR_OK = 0
@@ -70,7 +85,9 @@ def main():
 
     try:
         library = load_library(path)
-        get_function_list = C_GetFunctionList_Type(("C_GetFunctionList", library))
+        get_function_list = library.C_GetFunctionList
+        get_function_list.argtypes = [ctypes.POINTER(CK_FUNCTION_LIST_PTR)]
+        get_function_list.restype = CK_RV
 
         function_list = CK_FUNCTION_LIST_PTR()
         rv = get_function_list(ctypes.byref(function_list))
@@ -78,7 +95,10 @@ def main():
             print(f"C_GetFunctionList failed: 0x{rv:08X}")
             return
 
-        rv = function_list.contents.C_Initialize(None)
+        init_args = CK_C_INITIALIZE_ARGS()
+        init_args.flags = CKF_OS_LOCKING_OK
+
+        rv = function_list.contents.C_Initialize(ctypes.byref(init_args))
         if rv != CKR_OK:
             print(f"C_Initialize failed: 0x{rv:08X}")
             return
