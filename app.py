@@ -3,9 +3,11 @@ import os
 import platform
 
 
+APP_VERSION = "v0.1"
 CK_RV = ctypes.c_ulong
 CK_VOID_PTR = ctypes.c_void_p
 CK_ULONG = ctypes.c_ulong
+CK_SLOT_ID = CK_ULONG
 PACK = 1 if platform.system() == "Windows" else 0
 FUNCTYPE = ctypes.CFUNCTYPE
 
@@ -31,6 +33,31 @@ class CK_INFO(ctypes.Structure):
     ]
 
 
+class CK_TOKEN_INFO(ctypes.Structure):
+    if PACK:
+        _pack_ = PACK
+    _fields_ = [
+        ("label", ctypes.c_char * 32),
+        ("manufacturerID", ctypes.c_char * 32),
+        ("model", ctypes.c_char * 16),
+        ("serialNumber", ctypes.c_char * 16),
+        ("flags", CK_ULONG),
+        ("ulMaxSessionCount", CK_ULONG),
+        ("ulSessionCount", CK_ULONG),
+        ("ulMaxRwSessionCount", CK_ULONG),
+        ("ulRwSessionCount", CK_ULONG),
+        ("ulMaxPinLen", CK_ULONG),
+        ("ulMinPinLen", CK_ULONG),
+        ("ulTotalPublicMemory", CK_ULONG),
+        ("ulFreePublicMemory", CK_ULONG),
+        ("ulTotalPrivateMemory", CK_ULONG),
+        ("ulFreePrivateMemory", CK_ULONG),
+        ("hardwareVersion", CK_VERSION),
+        ("firmwareVersion", CK_VERSION),
+        ("utcTime", ctypes.c_char * 16),
+    ]
+
+
 class CK_FUNCTION_LIST(ctypes.Structure):
     if PACK:
         _pack_ = PACK
@@ -41,6 +68,10 @@ CK_FUNCTION_LIST_PTR = ctypes.POINTER(CK_FUNCTION_LIST)
 C_Initialize_Type = FUNCTYPE(CK_RV, CK_VOID_PTR)
 C_Finalize_Type = FUNCTYPE(CK_RV, CK_VOID_PTR)
 C_GetInfo_Type = FUNCTYPE(CK_RV, ctypes.POINTER(CK_INFO))
+C_GetFunctionList_Type = FUNCTYPE(CK_RV, ctypes.POINTER(CK_FUNCTION_LIST_PTR))
+C_GetSlotList_Type = FUNCTYPE(CK_RV, ctypes.c_ubyte, ctypes.POINTER(CK_SLOT_ID), ctypes.POINTER(CK_ULONG))
+C_GetSlotInfo_Type = FUNCTYPE(CK_RV, CK_SLOT_ID, CK_VOID_PTR)
+C_GetTokenInfo_Type = FUNCTYPE(CK_RV, CK_SLOT_ID, ctypes.POINTER(CK_TOKEN_INFO))
 
 
 CK_FUNCTION_LIST._fields_ = [
@@ -48,10 +79,16 @@ CK_FUNCTION_LIST._fields_ = [
     ("C_Initialize", C_Initialize_Type),
     ("C_Finalize", C_Finalize_Type),
     ("C_GetInfo", C_GetInfo_Type),
+    ("C_GetFunctionList", C_GetFunctionList_Type),
+    ("C_GetSlotList", C_GetSlotList_Type),
+    ("C_GetSlotInfo", C_GetSlotInfo_Type),
+    ("C_GetTokenInfo", C_GetTokenInfo_Type),
 ]
 
 
 CKR_OK = 0
+CKR_TOKEN_NOT_PRESENT = 0x000000E0
+CKR_SLOT_ID_INVALID = 0x00000003
 
 
 def clean_text(value):
@@ -65,7 +102,7 @@ def load_library(path):
 
 
 def main():
-    print("Hello from hardware-encryption-test")
+    print(f"Hello from hardware-encryption-test {APP_VERSION}")
     path = input("Enter path to PKCS#11 library: ").strip().strip('"')
 
     if not path:
@@ -77,36 +114,24 @@ def main():
         return
 
     try:
-        print(f"[diag] path accepted: {path}")
-        print("[diag] loading library")
         library = load_library(path)
-        print("[diag] library loaded")
-
-        print("[diag] resolving C_GetFunctionList")
         get_function_list = library.C_GetFunctionList
         get_function_list.argtypes = [ctypes.POINTER(CK_FUNCTION_LIST_PTR)]
         get_function_list.restype = CK_RV
-        print("[diag] C_GetFunctionList resolved")
 
         function_list = CK_FUNCTION_LIST_PTR()
-        print("[diag] calling C_GetFunctionList")
         rv = get_function_list(ctypes.byref(function_list))
-        print(f"[diag] C_GetFunctionList returned: 0x{rv:08X}")
         if rv != CKR_OK:
             print(f"C_GetFunctionList failed: 0x{rv:08X}")
             return
 
-        print("[diag] calling C_Initialize(NULL)")
         rv = function_list.contents.C_Initialize(None)
-        print(f"[diag] C_Initialize returned: 0x{rv:08X}")
         if rv != CKR_OK:
             print(f"C_Initialize failed: 0x{rv:08X}")
             return
 
         info = CK_INFO()
-        print("[diag] calling C_GetInfo")
         rv = function_list.contents.C_GetInfo(ctypes.byref(info))
-        print(f"[diag] C_GetInfo returned: 0x{rv:08X}")
         if rv != CKR_OK:
             print(f"C_GetInfo failed: 0x{rv:08X}")
             function_list.contents.C_Finalize(None)
@@ -120,9 +145,19 @@ def main():
         print(f"Description: {clean_text(info.libraryDescription)}")
         print(f"Library version: {info.libraryVersion.major}.{info.libraryVersion.minor}")
 
-        print("[diag] calling C_Finalize")
+        token_info = CK_TOKEN_INFO()
+        rv = function_list.contents.C_GetTokenInfo(CK_SLOT_ID(0), ctypes.byref(token_info))
+        if rv == CKR_OK:
+            print(f"Token label: {clean_text(token_info.label)}")
+            print(f"Token manufacturer: {clean_text(token_info.manufacturerID)}")
+            print(f"Token model: {clean_text(token_info.model)}")
+            print(f"Token serial: {clean_text(token_info.serialNumber)}")
+        elif rv in (CKR_TOKEN_NOT_PRESENT, CKR_SLOT_ID_INVALID):
+            print("подключите токен")
+        else:
+            print(f"C_GetTokenInfo failed: 0x{rv:08X}")
+
         function_list.contents.C_Finalize(None)
-        print("[diag] C_Finalize completed")
     except Exception as error:
         print(f"Error: {error}")
 
