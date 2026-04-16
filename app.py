@@ -84,13 +84,21 @@ def main():
         return
 
     try:
+        print(f"[diag] path accepted: {path}")
+        print("[diag] loading library")
         library = load_library(path)
+        print("[diag] library loaded")
+
+        print("[diag] resolving C_GetFunctionList")
         get_function_list = library.C_GetFunctionList
         get_function_list.argtypes = [ctypes.POINTER(CK_FUNCTION_LIST_PTR)]
         get_function_list.restype = CK_RV
+        print("[diag] C_GetFunctionList resolved")
 
         function_list = CK_FUNCTION_LIST_PTR()
+        print("[diag] calling C_GetFunctionList")
         rv = get_function_list(ctypes.byref(function_list))
+        print(f"[diag] C_GetFunctionList returned: 0x{rv:08X}")
         if rv != CKR_OK:
             print(f"C_GetFunctionList failed: 0x{rv:08X}")
             return
@@ -98,13 +106,17 @@ def main():
         init_args = CK_C_INITIALIZE_ARGS()
         init_args.flags = CKF_OS_LOCKING_OK
 
+        print("[diag] calling C_Initialize")
         rv = function_list.contents.C_Initialize(ctypes.byref(init_args))
+        print(f"[diag] C_Initialize returned: 0x{rv:08X}")
         if rv != CKR_OK:
             print(f"C_Initialize failed: 0x{rv:08X}")
             return
 
         info = CK_INFO()
+        print("[diag] calling C_GetInfo")
         rv = function_list.contents.C_GetInfo(ctypes.byref(info))
+        print(f"[diag] C_GetInfo returned: 0x{rv:08X}")
         if rv != CKR_OK:
             print(f"C_GetInfo failed: 0x{rv:08X}")
             function_list.contents.C_Finalize(None)
@@ -118,7 +130,9 @@ def main():
         print(f"Description: {clean_text(info.libraryDescription)}")
         print(f"Library version: {info.libraryVersion.major}.{info.libraryVersion.minor}")
 
+        print("[diag] calling C_Finalize")
         function_list.contents.C_Finalize(None)
+        print("[diag] C_Finalize completed")
     except Exception as error:
         print(f"Error: {error}")
 
