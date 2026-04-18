@@ -151,6 +151,16 @@ class CK_MECHANISM(ctypes.Structure):
     ]
 
 
+class CK_MECHANISM_INFO(ctypes.Structure):
+    if PACK:
+        _pack_ = PACK
+    _fields_ = [
+        ("ulMinKeySize", CK_ULONG),
+        ("ulMaxKeySize", CK_ULONG),
+        ("flags", CK_FLAGS),
+    ]
+
+
 class CK_FUNCTION_LIST(ctypes.Structure):
     if PACK:
         _pack_ = PACK
@@ -384,28 +394,24 @@ def find_pairs(session, funcs, cka_id=None, cka_label=None):
     public_objects = find_objects(session, funcs, [(CKA_CLASS, CKO_PUBLIC_KEY), (CKA_KEY_TYPE, CKK_RSA), *common], limit=128)
     private_objects = find_objects(session, funcs, [(CKA_CLASS, CKO_PRIVATE_KEY), (CKA_KEY_TYPE, CKK_RSA), *common], limit=128)
 
-    public_map = {}
+    pairs = {}
     for handle in public_objects:
         pair_id = attr_id(session, funcs, handle)
+        pair = pairs.setdefault(pair_id, {"id": pair_id, "label": "", "public": None, "private": None})
         pair_label = attr_text(session, funcs, handle, CKA_LABEL)
-        public_map[(pair_id, pair_label)] = handle
+        if pair_label and not pair["label"]:
+            pair["label"] = pair_label
+        pair["public"] = handle
 
-    private_map = {}
     for handle in private_objects:
         pair_id = attr_id(session, funcs, handle)
+        pair = pairs.setdefault(pair_id, {"id": pair_id, "label": "", "public": None, "private": None})
         pair_label = attr_text(session, funcs, handle, CKA_LABEL)
-        private_map[(pair_id, pair_label)] = handle
+        if pair_label and not pair["label"]:
+            pair["label"] = pair_label
+        pair["private"] = handle
 
-    keys = sorted(set(public_map) | set(private_map))
-    return [
-        {
-            "id": pair_id,
-            "label": pair_label,
-            "public": public_map.get((pair_id, pair_label)),
-            "private": private_map.get((pair_id, pair_label)),
-        }
-        for pair_id, pair_label in keys
-    ]
+    return [pairs[key] for key in sorted(pairs)]
 
 
 def is_hex(value):
@@ -469,34 +475,43 @@ def choose_pair(pairs, prompt="Выберите номер пары [0]: ", defa
         print("Нет такого номера")
 
 
-def generate_pair(session, funcs):
+def generate_pair(session, funcs, slot_id):
     cka_id = prompt_non_empty("Введите cka_id: ")
     cka_label = prompt_non_empty("Введите cka_label: ")
     pair_id_value = bytes.fromhex(cka_id) if is_hex(cka_id) else cka_id.encode("utf-8")
 
+    mechanisms = get_mechanism_list(funcs, slot_id)
+    if CKM_RSA_PKCS_KEY_PAIR_GEN not in mechanisms:
+        raise PKCS11Error("Токен не поддерживает CKM_RSA_PKCS_KEY_PAIR_GEN")
+
+    mechanism_info = get_mechanism_info(funcs, slot_id, CKM_RSA_PKCS_KEY_PAIR_GEN)
+    modulus_bits = 2048
+    if not (int(mechanism_info.ulMinKeySize) <= modulus_bits <= int(mechanism_info.ulMaxKeySize)):
+        raise PKCS11Error(
+            f"Токен не поддерживает RSA-{modulus_bits} (доступно {int(mechanism_info.ulMinKeySize)}..{int(mechanism_info.ulMaxKeySize)})"
+        )
+
     public_template, public_len = attributes_array(
         [
-            (CKA_TOKEN, True),
+            (CKA_CLASS, CKO_PUBLIC_KEY),
             (CKA_LABEL, cka_label),
             (CKA_ID, pair_id_value),
-            (CKA_MODULUS_BITS, 2048),
-            (CKA_PUBLIC_EXPONENT, b"\x01\x00\x01"),
+            (CKA_KEY_TYPE, CKK_RSA),
+            (CKA_TOKEN, True),
             (CKA_ENCRYPT, True),
-            (CKA_VERIFY, True),
-            (CKA_WRAP, True),
+            (CKA_PRIVATE, False),
+            (CKA_MODULUS_BITS, modulus_bits),
         ]
     )
     private_template, private_len = attributes_array(
         [
-            (CKA_TOKEN, True),
-            (CKA_PRIVATE, True),
+            (CKA_CLASS, CKO_PRIVATE_KEY),
             (CKA_LABEL, cka_label),
             (CKA_ID, pair_id_value),
-            (CKA_SENSITIVE, True),
+            (CKA_KEY_TYPE, CKK_RSA),
             (CKA_DECRYPT, True),
-            (CKA_SIGN, True),
-            (CKA_UNWRAP, True),
-            (CKA_EXTRACTABLE, False),
+            (CKA_TOKEN, True),
+            (CKA_PRIVATE, True),
         ]
     )
     mechanism = CK_MECHANISM(CKM_RSA_PKCS_KEY_PAIR_GEN, None, CK_ULONG(0))
@@ -618,6 +633,8 @@ def prepare_functions(library):
         "C_GetInfo": bind_function(library, "C_GetInfo", [ctypes.POINTER(CK_INFO)]),
         "C_GetSlotList": bind_function(library, "C_GetSlotList", [CK_BBOOL, ctypes.POINTER(CK_SLOT_ID), ctypes.POINTER(CK_ULONG)]),
         "C_GetTokenInfo": bind_function(library, "C_GetTokenInfo", [CK_SLOT_ID, ctypes.POINTER(CK_TOKEN_INFO)]),
+        "C_GetMechanismList": bind_function(library, "C_GetMechanismList", [CK_SLOT_ID, ctypes.POINTER(CK_MECHANISM_TYPE), ctypes.POINTER(CK_ULONG)]),
+        "C_GetMechanismInfo": bind_function(library, "C_GetMechanismInfo", [CK_SLOT_ID, CK_MECHANISM_TYPE, ctypes.POINTER(CK_MECHANISM_INFO)]),
         "C_OpenSession": bind_function(library, "C_OpenSession", [CK_SLOT_ID, CK_FLAGS, CK_VOID_PTR, CK_VOID_PTR, ctypes.POINTER(CK_SESSION_HANDLE)]),
         "C_CloseSession": bind_function(library, "C_CloseSession", [CK_SESSION_HANDLE]),
         "C_Login": bind_function(library, "C_Login", [CK_SESSION_HANDLE, CK_USER_TYPE, ctypes.c_char_p, CK_ULONG]),
@@ -667,6 +684,25 @@ def print_token_info(funcs, slot_id):
     print(f"Token serial: {clean_text(token_info.serialNumber)}")
 
 
+def get_mechanism_list(funcs, slot_id):
+    count = CK_ULONG(0)
+    rv = funcs["C_GetMechanismList"](slot_id, None, ctypes.byref(count))
+    rv_ok(rv, "C_GetMechanismList(count)")
+    if count.value == 0:
+        return []
+    mechanisms = (CK_MECHANISM_TYPE * count.value)()
+    rv = funcs["C_GetMechanismList"](slot_id, mechanisms, ctypes.byref(count))
+    rv_ok(rv, "C_GetMechanismList(data)")
+    return [int(mechanisms[index]) for index in range(int(count.value))]
+
+
+def get_mechanism_info(funcs, slot_id, mechanism_type):
+    info = CK_MECHANISM_INFO()
+    rv = funcs["C_GetMechanismInfo"](slot_id, CK_MECHANISM_TYPE(mechanism_type), ctypes.byref(info))
+    rv_ok(rv, "C_GetMechanismInfo")
+    return info
+
+
 def run_menu(funcs, slot_id):
     while True:
         choice = show_menu()
@@ -683,7 +719,7 @@ def run_menu(funcs, slot_id):
             try:
                 login(funcs, session)
                 try:
-                    generate_pair(session, funcs)
+                    generate_pair(session, funcs, slot_id)
                 finally:
                     logout(funcs, session)
             finally:
@@ -713,30 +749,24 @@ def run_menu(funcs, slot_id):
 
 
 def main():
-    print(f"Hello from hardware-encryption-test {APP_VERSION}")
+    raw_library_path = input("Путь к PKCS#11 библиотеке [Enter для файла рядом с приложением]: ").strip().strip('"')
+    library_path = resolve_library_path(raw_library_path)
+    if not library_path.exists():
+        print(f"Библиотека не найдена: {library_path}")
+        sys.exit(1)
 
+    library = load_library(str(library_path))
     funcs = None
     try:
-        raw_path = input("Enter path to PKCS#11 library: ").strip().strip('"')
-        library_path = resolve_library_path(raw_path)
-
-        if not library_path.exists():
-            print(f"Library not found: {library_path}")
-            return
-
-        library = load_library(str(library_path))
         funcs = prepare_functions(library)
         rv = funcs["C_Initialize"](None)
         if rv not in (CKR_OK, CKR_CRYPTOKI_ALREADY_INITIALIZED):
-            raise PKCS11Error("C_Initialize", rv)
-
+            rv_ok(rv, "C_Initialize")
         print_library_info(funcs)
         slot_id = get_first_token_slot(funcs)
         print_token_info(funcs, slot_id)
         run_menu(funcs, slot_id)
-    except EOFError:
-        print("Input cancelled")
-    except Exception as error:
+    except PKCS11Error as error:
         print(f"Error: {error}")
     finally:
         if funcs is not None:
