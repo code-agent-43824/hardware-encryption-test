@@ -645,11 +645,38 @@ def generate_pair(session, funcs, slot_id):
 def signing_mechanism_for_pair(pair):
     algorithm = pair.get("algorithm")
     if algorithm == CKK_RSA:
-        return CK_MECHANISM(CKM_SHA256_RSA_PKCS, None, CK_ULONG(0))
+        return CK_MECHANISM(CKM_SHA256_RSA_PKCS, None, CK_ULONG(0)), None, "SHA-256"
+    if algorithm in {CKK_GOSTR3410, CKK_GOSTR3410_512}:
+        while True:
+            print("Как хешировать для подписи?")
+            print("0) программно библиотекой Rutoken")
+            print("1) аппаратно внутри токена")
+            raw = input("Выберите режим [0]: ").strip()
+            if raw == "":
+                raw = "0"
+            if raw not in {"0", "1"}:
+                print("Введите 0 или 1")
+                continue
+            software_hash = raw == "0"
+            break
     if algorithm == CKK_GOSTR3410:
-        return CK_MECHANISM(CKM_GOSTR3410_WITH_GOSTR3411_12_256, None, CK_ULONG(0))
+        mechanism_type = CKM_GOSTR3410_WITH_GOSTR3411_12_256
+        params = GOST_3411_2012_256_PARAMS
+        hash_name = "ГОСТ Р 34.11-2012(256)"
     if algorithm == CKK_GOSTR3410_512:
-        return CK_MECHANISM(CKM_GOSTR3410_WITH_GOSTR3411_12_512, None, CK_ULONG(0))
+        mechanism_type = CKM_GOSTR3410_WITH_GOSTR3411_12_512
+        params = GOST_3411_2012_512_PARAMS
+        hash_name = "ГОСТ Р 34.11-2012(512)"
+    if algorithm in {CKK_GOSTR3410, CKK_GOSTR3410_512}:
+        if software_hash:
+            param_buffer = ctypes.create_string_buffer(params)
+            mechanism = CK_MECHANISM(
+                mechanism_type,
+                ctypes.cast(param_buffer, CK_VOID_PTR),
+                CK_ULONG(len(params)),
+            )
+            return mechanism, param_buffer, f"{hash_name}, программное хеширование"
+        return CK_MECHANISM(mechanism_type, None, CK_ULONG(0)), None, f"{hash_name}, аппаратное хеширование"
     raise PKCS11Error(f"Неподдерживаемый тип ключа для подписи: {pair_algorithm_name(algorithm)}")
 
 
@@ -704,7 +731,7 @@ def sign_file(session, funcs):
 
     data = file_path.read_bytes()
     data_buffer = (CK_BYTE * len(data)).from_buffer_copy(data)
-    mechanism = signing_mechanism_for_pair(pair)
+    mechanism, mechanism_keepalive, hash_mode_name = signing_mechanism_for_pair(pair)
     signature_lengths = []
     last_signature_bytes = b""
     operation_times = []
@@ -740,6 +767,7 @@ def sign_file(session, funcs):
 
     print_pair("Подпись выполнена ключом", pair)
     print(f"Алгоритм подписи: {pair_algorithm_name(pair.get('algorithm'))}")
+    print(f"Режим хеширования: {hash_mode_name}")
     print(f"Файл: {file_path}")
     print(f"Размер данных: {len(data)} байт")
     print(f"Количество подписаний: {count}")
