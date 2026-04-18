@@ -79,6 +79,7 @@ CKA_GOST28147_PARAMS = 0x00000252
 CKR_OK = 0
 CKR_ATTRIBUTE_TYPE_INVALID = 0x00000012
 CKR_CRYPTOKI_ALREADY_INITIALIZED = 0x00000191
+CKR_MECHANISM_INVALID = 0x00000070
 CKR_PIN_INCORRECT = 0x000000A0
 CKR_SESSION_HANDLE_INVALID = 0x000000B3
 CKR_USER_ALREADY_LOGGED_IN = 0x00000100
@@ -475,6 +476,14 @@ def random_bytes(session, funcs, size):
     return bytes(buffer)
 
 
+def mechanism_with_optional_param(mechanism_type, param_bytes=None):
+    if param_bytes:
+        param_buffer = ctypes.create_string_buffer(param_bytes)
+        mechanism = CK_MECHANISM(mechanism_type, ctypes.cast(param_buffer, CK_VOID_PTR), CK_ULONG(len(param_bytes)))
+        return mechanism, param_buffer
+    return CK_MECHANISM(mechanism_type, None, CK_ULONG(0)), None
+
+
 def print_pair(prefix, pair):
     algorithm = pair.get("algorithm")
     if algorithm is None:
@@ -854,80 +863,57 @@ def derive_kek(session, funcs, pair):
 
 def create_source_cek(session, funcs, mode_info):
     label = make_random_label("gost28147-cek-src")
-    if mode_info["mode"] == "software":
-        key_value = random_bytes(session, funcs, GOST_28147_KEY_SIZE)
-        template, template_len = attributes_array(
-            [
-                (CKA_CLASS, CKO_SECRET_KEY),
-                (CKA_LABEL, label),
-                (CKA_KEY_TYPE, CKK_GOST28147),
-                (CKA_TOKEN, False),
-                (CKA_PRIVATE, True),
-                (CKA_MODIFIABLE, True),
-                (CKA_ENCRYPT, True),
-                (CKA_DECRYPT, True),
-                (CKA_GOST28147_PARAMS, GOST_28147_PARAMS),
-                (CKA_VALUE, key_value),
-                (CKA_EXTRACTABLE, True),
-                (CKA_SENSITIVE, False),
-            ]
-        )
-        key_handle = CK_OBJECT_HANDLE()
-        rv = funcs["C_CreateObject"](session, template, CK_ULONG(template_len), ctypes.byref(key_handle))
-        rv_ok(rv, "C_CreateObject(software CEK)")
-        return key_handle, label
-
-    mechanism = CK_MECHANISM(CKM_GOST28147_KEY_GEN, None, CK_ULONG(0))
+    key_value = random_bytes(session, funcs, GOST_28147_KEY_SIZE)
     template, template_len = attributes_array(
         [
             (CKA_CLASS, CKO_SECRET_KEY),
             (CKA_LABEL, label),
             (CKA_KEY_TYPE, CKK_GOST28147),
-            (CKA_TOKEN, True),
+            (CKA_TOKEN, mode_info["cka_token"]),
             (CKA_PRIVATE, True),
             (CKA_MODIFIABLE, True),
             (CKA_ENCRYPT, True),
             (CKA_DECRYPT, True),
             (CKA_GOST28147_PARAMS, GOST_28147_PARAMS),
-            (CKA_EXTRACTABLE, True),
-            (CKA_SENSITIVE, True),
+            (CKA_VALUE, key_value),
+            (CKA_EXTRACTABLE, True if mode_info["mode"] == "software" else False),
+            (CKA_SENSITIVE, False if mode_info["mode"] == "software" else True),
         ]
     )
     key_handle = CK_OBJECT_HANDLE()
-    rv = funcs["C_GenerateKey"](
-        session,
-        ctypes.byref(mechanism),
-        template,
-        CK_ULONG(template_len),
-        ctypes.byref(key_handle),
-    )
-    rv_ok(rv, "C_GenerateKey(hardware CEK)")
+    rv = funcs["C_CreateObject"](session, template, CK_ULONG(template_len), ctypes.byref(key_handle))
+    rv_ok(rv, f"C_CreateObject({mode_info['mode']} CEK)")
     return key_handle, label
 
 
 def wrap_cek(session, funcs, kek_handle, cek_handle, ukm):
-    ukm_buffer = ctypes.create_string_buffer(ukm)
-    mechanism = CK_MECHANISM(CKM_GOST28147_KEY_WRAP, ctypes.cast(ukm_buffer, CK_VOID_PTR), CK_ULONG(len(ukm)))
-    wrapped_len = CK_ULONG(0)
-    rv = funcs["C_WrapKey"](session, ctypes.byref(mechanism), kek_handle, cek_handle, None, ctypes.byref(wrapped_len))
-    rv_ok(rv, "C_WrapKey(size)")
-    wrapped = (CK_BYTE * int(wrapped_len.value))()
-    rv = funcs["C_WrapKey"](
-        session,
-        ctypes.byref(mechanism),
-        kek_handle,
-        cek_handle,
-        ctypes.cast(wrapped, CK_BYTE_PTR),
-        ctypes.byref(wrapped_len),
-    )
-    rv_ok(rv, "C_WrapKey(data)")
-    return bytes(wrapped[: int(wrapped_len.value)]), ukm_buffer
+    last_error = None
+    for mechanism_type in (CKM_GOST28147_KEY_WRAP, CKM_GOST28147):
+        mechanism, keepalive = mechanism_with_optional_param(mechanism_type, ukm)
+        wrapped_len = CK_ULONG(0)
+        rv = funcs["C_WrapKey"](session, ctypes.byref(mechanism), kek_handle, cek_handle, None, ctypes.byref(wrapped_len))
+        if rv == CKR_MECHANISM_INVALID:
+            last_error = PKCS11Error(f"C_WrapKey(size, mechanism=0x{mechanism_type:08X})", rv)
+            continue
+        rv_ok(rv, f"C_WrapKey(size, mechanism=0x{mechanism_type:08X})")
+
+        wrapped = (CK_BYTE * int(wrapped_len.value))()
+        rv = funcs["C_WrapKey"](
+            session,
+            ctypes.byref(mechanism),
+            kek_handle,
+            cek_handle,
+            ctypes.cast(wrapped, CK_BYTE_PTR),
+            ctypes.byref(wrapped_len),
+        )
+        rv_ok(rv, f"C_WrapKey(data, mechanism=0x{mechanism_type:08X})")
+        return bytes(wrapped[: int(wrapped_len.value)]), keepalive, mechanism_type
+
+    raise last_error or PKCS11Error("C_WrapKey")
 
 
 def unwrap_cek(session, funcs, kek_handle, wrapped_key, ukm, mode_info):
     label = make_random_label("gost28147-cek")
-    ukm_buffer = ctypes.create_string_buffer(ukm)
-    mechanism = CK_MECHANISM(CKM_GOST28147_KEY_WRAP, ctypes.cast(ukm_buffer, CK_VOID_PTR), CK_ULONG(len(ukm)))
     template_items = [
         (CKA_CLASS, CKO_SECRET_KEY),
         (CKA_LABEL, label),
@@ -945,19 +931,27 @@ def unwrap_cek(session, funcs, kek_handle, wrapped_key, ukm, mode_info):
         template_items.extend([(CKA_EXTRACTABLE, False), (CKA_SENSITIVE, True)])
     template, template_len = attributes_array(template_items)
     wrapped_buffer = (CK_BYTE * len(wrapped_key)).from_buffer_copy(wrapped_key)
-    key_handle = CK_OBJECT_HANDLE()
-    rv = funcs["C_UnwrapKey"](
-        session,
-        ctypes.byref(mechanism),
-        kek_handle,
-        ctypes.cast(wrapped_buffer, CK_BYTE_PTR),
-        CK_ULONG(len(wrapped_key)),
-        template,
-        CK_ULONG(template_len),
-        ctypes.byref(key_handle),
-    )
-    rv_ok(rv, "C_UnwrapKey")
-    return key_handle, label, ukm_buffer
+    last_error = None
+    for mechanism_type in (CKM_GOST28147_KEY_WRAP, CKM_GOST28147):
+        mechanism, keepalive = mechanism_with_optional_param(mechanism_type, ukm)
+        key_handle = CK_OBJECT_HANDLE()
+        rv = funcs["C_UnwrapKey"](
+            session,
+            ctypes.byref(mechanism),
+            kek_handle,
+            ctypes.cast(wrapped_buffer, CK_BYTE_PTR),
+            CK_ULONG(len(wrapped_key)),
+            template,
+            CK_ULONG(template_len),
+            ctypes.byref(key_handle),
+        )
+        if rv == CKR_MECHANISM_INVALID:
+            last_error = PKCS11Error(f"C_UnwrapKey(mechanism=0x{mechanism_type:08X})", rv)
+            continue
+        rv_ok(rv, f"C_UnwrapKey(mechanism=0x{mechanism_type:08X})")
+        return key_handle, label, keepalive, mechanism_type
+
+    raise last_error or PKCS11Error("C_UnwrapKey")
 
 
 def encrypt_with_cek(session, funcs, cek_handle, plaintext):
@@ -1015,14 +1009,15 @@ def encrypt_file(session, funcs, slot_id):
     source_cek = None
     final_cek = None
     wrapped = b""
+    wrap_mechanism_type = None
 
     try:
         source_cek, _ = create_source_cek(session, funcs, mode_info)
-        wrapped, _ = wrap_cek(session, funcs, kek_info["handle"], source_cek, kek_info["ukm"])
+        wrapped, _, wrap_mechanism_type = wrap_cek(session, funcs, kek_info["handle"], source_cek, kek_info["ukm"])
         rv = funcs["C_DestroyObject"](session, source_cek)
         rv_ok(rv, "C_DestroyObject(source CEK)")
         source_cek = None
-        final_cek, _, _ = unwrap_cek(session, funcs, kek_info["handle"], wrapped, kek_info["ukm"], mode_info)
+        final_cek, _, _, wrap_mechanism_type = unwrap_cek(session, funcs, kek_info["handle"], wrapped, kek_info["ukm"], mode_info)
         setup_elapsed = time.perf_counter() - setup_started
 
         operation_times = []
@@ -1051,7 +1046,7 @@ def encrypt_file(session, funcs, slot_id):
     print(f"Метод размещения ключа: CKA_TOKEN={'TRUE' if mode_info['cka_token'] else 'FALSE'}")
     print(f"Алгоритм KEK: VKO / CKM_GOSTR3410_12_DERIVE, KDF=0x{kek_info['kdf']:08X}")
     print(f"Размер publicData для VKO: {kek_info['public_data_len']} байт | UKM: {kek_info['ukm'].hex().upper()}")
-    print(f"CEK получен через wrap/unwrap, размер wrapped CEK: {len(wrapped)} байт")
+    print(f"CEK получен через wrap/unwrap, механизм=0x{(wrap_mechanism_type or 0):08X}, размер wrapped CEK: {len(wrapped)} байт")
     print(f"Файл: {file_path}")
     print(f"Размер исходных данных: {file_path.stat().st_size} байт")
     print(f"Размер данных после padding: {len(plaintext)} байт")
