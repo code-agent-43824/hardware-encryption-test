@@ -1,7 +1,10 @@
+import base64
 import ctypes
 import getpass
 import platform
 import sys
+import textwrap
+import time
 from pathlib import Path
 
 
@@ -322,6 +325,15 @@ def attr_text(session, funcs, obj_handle, attr_type):
     return value.decode("utf-8", errors="ignore").strip().rstrip("\x00")
 
 
+def attr_ulong(session, funcs, obj_handle, attr_type):
+    value = attr_bytes(session, funcs, obj_handle, attr_type)
+    if value is None:
+        return None
+    if len(value) < ctypes.sizeof(CK_ULONG):
+        return None
+    return int(CK_ULONG.from_buffer_copy(value[: ctypes.sizeof(CK_ULONG)]).value)
+
+
 def display_id(value):
     if not value:
         return ""
@@ -360,7 +372,11 @@ def prompt_count():
 
 
 def print_pair(prefix, pair):
-    print(f"{prefix}: cka_id={pair['id']} | cka_label={pair['label']}")
+    algorithm = pair.get("algorithm")
+    if algorithm is None:
+        print(f"{prefix}: cka_id={pair['id']} | cka_label={pair['label']}")
+        return
+    print(f"{prefix}: cka_id={pair['id']} | cka_label={pair['label']} | algorithm=0x{algorithm:08X}")
 
 
 def find_objects(session, funcs, template_items, limit=32):
@@ -391,27 +407,25 @@ def find_pairs(session, funcs, cka_id=None, cka_label=None):
     if cka_label:
         common.append((CKA_LABEL, cka_label))
 
-    public_objects = find_objects(session, funcs, [(CKA_CLASS, CKO_PUBLIC_KEY), (CKA_KEY_TYPE, CKK_RSA), *common], limit=128)
-    private_objects = find_objects(session, funcs, [(CKA_CLASS, CKO_PRIVATE_KEY), (CKA_KEY_TYPE, CKK_RSA), *common], limit=128)
+    public_objects = find_objects(session, funcs, [(CKA_CLASS, CKO_PUBLIC_KEY), *common], limit=128)
+    private_objects = find_objects(session, funcs, [(CKA_CLASS, CKO_PRIVATE_KEY), *common], limit=128)
 
     pairs = {}
-    for handle in public_objects:
-        pair_id = attr_id(session, funcs, handle)
-        pair = pairs.setdefault(pair_id, {"id": pair_id, "label": "", "public": None, "private": None})
-        pair_label = attr_text(session, funcs, handle, CKA_LABEL)
-        if pair_label and not pair["label"]:
-            pair["label"] = pair_label
-        pair["public"] = handle
+    for key_name, handles in (("public", public_objects), ("private", private_objects)):
+        for handle in handles:
+            pair_id = attr_id(session, funcs, handle)
+            algorithm = attr_ulong(session, funcs, handle, CKA_KEY_TYPE)
+            pair_key = (pair_id, algorithm)
+            pair = pairs.setdefault(
+                pair_key,
+                {"id": pair_id, "label": "", "algorithm": algorithm, "public": None, "private": None},
+            )
+            pair_label = attr_text(session, funcs, handle, CKA_LABEL)
+            if pair_label and not pair["label"]:
+                pair["label"] = pair_label
+            pair[key_name] = handle
 
-    for handle in private_objects:
-        pair_id = attr_id(session, funcs, handle)
-        pair = pairs.setdefault(pair_id, {"id": pair_id, "label": "", "public": None, "private": None})
-        pair_label = attr_text(session, funcs, handle, CKA_LABEL)
-        if pair_label and not pair["label"]:
-            pair["label"] = pair_label
-        pair["private"] = handle
-
-    return [pairs[key] for key in sorted(pairs)]
+    return [pairs[key] for key in sorted(pairs, key=lambda item: (item[0], -1 if item[1] is None else item[1]))]
 
 
 def is_hex(value):
@@ -440,6 +454,8 @@ def close_session(funcs, session):
 
 def login(funcs, session):
     pin = getpass.getpass("PIN токена: ")
+    if pin == "":
+        raise PKCS11Error("PIN-код не должен быть пустым")
     pin_bytes = pin.encode("utf-8")
     rv = funcs["C_Login"](session, CK_USER_TYPE(CKU_USER), pin_bytes, CK_ULONG(len(pin_bytes)))
     if rv in (CKR_OK, CKR_USER_ALREADY_LOGGED_IN):
@@ -584,7 +600,13 @@ def sign_file(session, funcs):
     data_buffer = (CK_BYTE * len(data)).from_buffer_copy(data)
     mechanism = CK_MECHANISM(CKM_SHA256_RSA_PKCS, None, CK_ULONG(0))
     signature_lengths = []
+    last_signature_bytes = b""
+    operation_times = []
+    total_started = time.perf_counter()
+
     for _ in range(count):
+        started = time.perf_counter()
+
         rv = funcs["C_SignInit"](session, ctypes.byref(mechanism), private_key)
         rv_ok(rv, "C_SignInit")
 
@@ -601,13 +623,26 @@ def sign_file(session, funcs):
             ctypes.byref(out_len),
         )
         rv_ok(rv, "C_Sign(data)")
+
+        operation_times.append(time.perf_counter() - started)
         signature_lengths.append(int(out_len.value))
+        last_signature_bytes = bytes(signature[: int(out_len.value)])
+
+    total_elapsed = time.perf_counter() - total_started
+    avg_elapsed = total_elapsed / count if count else 0.0
+    signature_base64 = base64.b64encode(last_signature_bytes).decode("ascii") if last_signature_bytes else ""
 
     print_pair("Подпись выполнена ключом", pair)
     print(f"Файл: {file_path}")
     print(f"Размер данных: {len(data)} байт")
     print(f"Количество подписаний: {count}")
     print(f"Размер последней подписи: {signature_lengths[-1]} байт")
+    print(f"Общее время: {total_elapsed:.6f} сек")
+    print(f"Среднее время одной подписи: {avg_elapsed:.6f} сек")
+    print(f"Минимум: {min(operation_times):.6f} сек | Максимум: {max(operation_times):.6f} сек")
+    print("Подпись (Base64):")
+    for line in textwrap.wrap(signature_base64, 64):
+        print(line)
 
 
 def show_menu():
