@@ -1,7 +1,6 @@
 import base64
 import ctypes
 import getpass
-import os
 import platform
 import sys
 import textwrap
@@ -43,7 +42,9 @@ CKM_RSA_PKCS_KEY_PAIR_GEN = 0x00000000
 CKM_SHA256_RSA_PKCS = 0x00000040
 CKM_GOSTR3410_KEY_PAIR_GEN = 0x00001200
 CKM_GOST28147_KEY_GEN = 0x00001240
+CKM_GOST28147_ECB = 0x00001241
 CKM_GOST28147 = 0x00001242
+CKM_GOST28147_KEY_WRAP = 0x00001244
 CKM_GOSTR3410_512_KEY_PAIR_GEN = CK_VENDOR_PKCS11_RU_TEAM_TC26 | 0x005
 CKM_GOSTR3410_12_DERIVE = CK_VENDOR_PKCS11_RU_TEAM_TC26 | 0x007
 CKM_GOSTR3410_WITH_GOSTR3411_12_256 = CK_VENDOR_PKCS11_RU_TEAM_TC26 | 0x008
@@ -463,6 +464,17 @@ def pad_gost_data(data):
     return data + bytes([padding_size]) * padding_size
 
 
+def xor_bytes(left, right):
+    return bytes(a ^ b for a, b in zip(left, right))
+
+
+def random_bytes(session, funcs, size):
+    buffer = (CK_BYTE * size)()
+    rv = funcs["C_GenerateRandom"](session, ctypes.cast(buffer, CK_BYTE_PTR), CK_ULONG(size))
+    rv_ok(rv, "C_GenerateRandom")
+    return bytes(buffer)
+
+
 def print_pair(prefix, pair):
     algorithm = pair.get("algorithm")
     if algorithm is None:
@@ -802,7 +814,7 @@ def derive_kek(session, funcs, pair):
     if not public_value:
         raise PKCS11Error("Не удалось прочитать CKA_VALUE открытого ГОСТ-ключа")
 
-    ukm = os.urandom(UKM_LENGTH)
+    ukm = random_bytes(session, funcs, UKM_LENGTH)
     mechanism, mechanism_params, kdf = build_vko_mechanism(pair, public_value, ukm)
     kek_template, kek_template_len = attributes_array(
         [
@@ -843,7 +855,7 @@ def derive_kek(session, funcs, pair):
 def create_source_cek(session, funcs, mode_info):
     label = make_random_label("gost28147-cek-src")
     if mode_info["mode"] == "software":
-        key_value = os.urandom(GOST_28147_KEY_SIZE)
+        key_value = random_bytes(session, funcs, GOST_28147_KEY_SIZE)
         template, template_len = attributes_array(
             [
                 (CKA_CLASS, CKO_SECRET_KEY),
@@ -895,7 +907,7 @@ def create_source_cek(session, funcs, mode_info):
 
 def wrap_cek(session, funcs, kek_handle, cek_handle, ukm):
     ukm_buffer = ctypes.create_string_buffer(ukm)
-    mechanism = CK_MECHANISM(CKM_GOST28147, ctypes.cast(ukm_buffer, CK_VOID_PTR), CK_ULONG(len(ukm)))
+    mechanism = CK_MECHANISM(CKM_GOST28147_KEY_WRAP, ctypes.cast(ukm_buffer, CK_VOID_PTR), CK_ULONG(len(ukm)))
     wrapped_len = CK_ULONG(0)
     rv = funcs["C_WrapKey"](session, ctypes.byref(mechanism), kek_handle, cek_handle, None, ctypes.byref(wrapped_len))
     rv_ok(rv, "C_WrapKey(size)")
@@ -915,7 +927,7 @@ def wrap_cek(session, funcs, kek_handle, cek_handle, ukm):
 def unwrap_cek(session, funcs, kek_handle, wrapped_key, ukm, mode_info):
     label = make_random_label("gost28147-cek")
     ukm_buffer = ctypes.create_string_buffer(ukm)
-    mechanism = CK_MECHANISM(CKM_GOST28147, ctypes.cast(ukm_buffer, CK_VOID_PTR), CK_ULONG(len(ukm)))
+    mechanism = CK_MECHANISM(CKM_GOST28147_KEY_WRAP, ctypes.cast(ukm_buffer, CK_VOID_PTR), CK_ULONG(len(ukm)))
     template_items = [
         (CKA_CLASS, CKO_SECRET_KEY),
         (CKA_LABEL, label),
@@ -949,30 +961,38 @@ def unwrap_cek(session, funcs, kek_handle, wrapped_key, ukm, mode_info):
 
 
 def encrypt_with_cek(session, funcs, cek_handle, plaintext):
-    iv = os.urandom(GOST28147_89_BLOCK_SIZE)
-    iv_buffer = ctypes.create_string_buffer(iv)
-    mechanism = CK_MECHANISM(CKM_GOST28147, ctypes.cast(iv_buffer, CK_VOID_PTR), CK_ULONG(len(iv)))
-    rv = funcs["C_EncryptInit"](session, ctypes.byref(mechanism), cek_handle)
-    rv_ok(rv, "C_EncryptInit")
+    iv = random_bytes(session, funcs, GOST28147_89_BLOCK_SIZE)
+    mechanism = CK_MECHANISM(CKM_GOST28147_ECB, None, CK_ULONG(0))
+    previous_block = iv
+    encrypted_blocks = []
 
-    plaintext_buffer = (CK_BYTE * len(plaintext)).from_buffer_copy(plaintext)
-    out_len = CK_ULONG(0)
-    rv = funcs["C_Encrypt"](session, plaintext_buffer, CK_ULONG(len(plaintext)), None, ctypes.byref(out_len))
-    rv_ok(rv, "C_Encrypt(size)")
-    ciphertext = (CK_BYTE * int(out_len.value))()
-    rv = funcs["C_Encrypt"](
-        session,
-        plaintext_buffer,
-        CK_ULONG(len(plaintext)),
-        ctypes.cast(ciphertext, CK_BYTE_PTR),
-        ctypes.byref(out_len),
-    )
-    rv_ok(rv, "C_Encrypt(data)")
-    return iv, bytes(ciphertext[: int(out_len.value)])
+    for offset in range(0, len(plaintext), GOST28147_89_BLOCK_SIZE):
+        block = plaintext[offset : offset + GOST28147_89_BLOCK_SIZE]
+        mixed_block = xor_bytes(previous_block, block)
+        input_buffer = (CK_BYTE * len(mixed_block)).from_buffer_copy(mixed_block)
+
+        rv = funcs["C_EncryptInit"](session, ctypes.byref(mechanism), cek_handle)
+        rv_ok(rv, "C_EncryptInit")
+
+        out_len = CK_ULONG(GOST28147_89_BLOCK_SIZE)
+        out_block = (CK_BYTE * GOST28147_89_BLOCK_SIZE)()
+        rv = funcs["C_Encrypt"](
+            session,
+            ctypes.cast(input_buffer, CK_BYTE_PTR),
+            CK_ULONG(len(mixed_block)),
+            ctypes.cast(out_block, CK_BYTE_PTR),
+            ctypes.byref(out_len),
+        )
+        rv_ok(rv, "C_Encrypt(data)")
+
+        encrypted_block = bytes(out_block[: int(out_len.value)])
+        encrypted_blocks.append(encrypted_block)
+        previous_block = encrypted_block
+
+    return iv, b"".join(encrypted_blocks)
 
 
 def encrypt_file(session, funcs, slot_id):
-    mechanisms = set(get_mechanism_list(funcs, slot_id))
     raw_path = input("Что зашифровать? ").strip().strip('"')
     file_path = resolve_sample_file_path(raw_path)
     if not file_path.exists():
@@ -981,14 +1001,6 @@ def encrypt_file(session, funcs, slot_id):
 
     count = prompt_encrypt_count()
     mode_info = choose_crypto_mode()
-    required_mechanisms = {CKM_GOSTR3410_12_DERIVE, CKM_GOST28147}
-    if mode_info["mode"] == "hardware":
-        required_mechanisms.add(CKM_GOST28147_KEY_GEN)
-    missing = sorted(mechanism for mechanism in required_mechanisms if mechanism not in mechanisms)
-    if missing:
-        missing_text = ", ".join(f"0x{mechanism:08X}" for mechanism in missing)
-        raise PKCS11Error(f"Токен не поддерживает обязательные механизмы: {missing_text}")
-
     pairs = [pair for pair in find_pairs(session, funcs) if pair.get("algorithm") in {CKK_GOSTR3410, CKK_GOSTR3410_512}]
     if not pairs:
         print("ГОСТ-пары не найдены")
