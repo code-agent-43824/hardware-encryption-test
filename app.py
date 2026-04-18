@@ -813,7 +813,7 @@ def build_vko_mechanism(pair, public_value, ukm):
     return mechanism, params_struct, kdf
 
 
-def derive_kek(session, funcs, pair):
+def derive_kek(session, funcs, pair, ukm_override=None):
     public_key = pair.get("public")
     private_key = pair.get("private")
     if not public_key or not private_key:
@@ -823,7 +823,7 @@ def derive_kek(session, funcs, pair):
     if not public_value:
         raise PKCS11Error("Не удалось прочитать CKA_VALUE открытого ГОСТ-ключа")
 
-    ukm = random_bytes(session, funcs, UKM_LENGTH)
+    ukm = ukm_override if ukm_override is not None else random_bytes(session, funcs, UKM_LENGTH)
     mechanism, mechanism_params, kdf = build_vko_mechanism(pair, public_value, ukm)
     kek_template, kek_template_len = attributes_array(
         [
@@ -1017,6 +1017,11 @@ def encrypt_file(session, funcs, slot_id):
         rv = funcs["C_DestroyObject"](session, source_cek)
         rv_ok(rv, "C_DestroyObject(source CEK)")
         source_cek = None
+        rv = funcs["C_DestroyObject"](session, kek_info["handle"])
+        rv_ok(rv, "C_DestroyObject(KEK after wrap)")
+        kek_info["handle"] = None
+
+        kek_info = derive_kek(session, funcs, pair, ukm_override=kek_info["ukm"])
         final_cek, _, _, wrap_mechanism_type = unwrap_cek(session, funcs, kek_info["handle"], wrapped, kek_info["ukm"], mode_info)
         setup_elapsed = time.perf_counter() - setup_started
 
