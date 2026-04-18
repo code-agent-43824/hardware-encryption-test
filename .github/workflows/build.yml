@@ -38,8 +38,15 @@ jobs:
       - name: Build
         run: pyinstaller --onefile --name hardware-encryption-test app.py
 
+      - name: Prepare artifact directory
+        shell: bash
+        run: |
+          mkdir -p artifact
+          cp "${{ matrix.binary_path }}" artifact/
+          cp testdata/lorem-500kb.txt artifact/
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.binary_path }}
+          path: artifact/

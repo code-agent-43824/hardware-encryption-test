@@ -73,6 +73,7 @@ CKR_USER_ALREADY_LOGGED_IN = 0x00000100
 CKR_USER_NOT_LOGGED_IN = 0x00000101
 
 ATTR_UNAVAILABLE = (1 << (ctypes.sizeof(CK_ULONG) * 8)) - 1
+SAMPLE_FILE_NAMES = ["lorem-500kb.txt", str(Path("testdata") / "lorem-500kb.txt")]
 
 
 class PKCS11Error(Exception):
@@ -198,6 +199,17 @@ def resolve_library_path(raw_path):
     if raw_path:
         return Path(raw_path).expanduser()
     return app_dir() / default_library_name()
+
+
+def resolve_sample_file_path(raw_path):
+    if raw_path:
+        return Path(raw_path).expanduser()
+    base = app_dir()
+    for name in SAMPLE_FILE_NAMES:
+        candidate = base / name
+        if candidate.exists():
+            return candidate
+    return base / SAMPLE_FILE_NAMES[0]
 
 
 def bind_function(library, name, argtypes, restype=CK_RV):
@@ -536,12 +548,9 @@ def find_pair_menu(session, funcs):
 
 def sign_file(session, funcs):
     raw_path = input("Что подписать? ").strip().strip('"')
-    if not raw_path:
-        print("Нужно указать путь к файлу")
-        return
-    file_path = Path(raw_path).expanduser()
+    file_path = resolve_sample_file_path(raw_path)
     if not file_path.exists():
-        print("Файл не найден")
+        print(f"Файл не найден: {file_path}")
         return
     count = prompt_count()
     pairs = find_pairs(session, funcs)
