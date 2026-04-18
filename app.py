@@ -454,13 +454,17 @@ def close_session(funcs, session):
 
 def login(funcs, session):
     pin = getpass.getpass("PIN токена: ")
+    used_default_pin = False
     if pin == "":
-        raise PKCS11Error("PIN-код не должен быть пустым")
+        pin = "12345678"
+        used_default_pin = True
     pin_bytes = pin.encode("utf-8")
     rv = funcs["C_Login"](session, CK_USER_TYPE(CKU_USER), pin_bytes, CK_ULONG(len(pin_bytes)))
     if rv in (CKR_OK, CKR_USER_ALREADY_LOGGED_IN):
         return
     if rv == CKR_PIN_INCORRECT:
+        if used_default_pin:
+            raise PKCS11Error("PIN не передан, автоматическая проверка 12345678 не подошла. Введите правильный PIN", rv)
         raise PKCS11Error("Неверный PIN", rv)
     raise PKCS11Error("C_Login", rv)
 
