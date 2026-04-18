@@ -858,21 +858,20 @@ def derive_kek(session, funcs, pair, ukm_override=None):
 
 def create_source_cek(session, funcs, mode_info):
     label = make_random_label("gost28147-cek-src")
+    key_id = random_bytes(session, funcs, 16)
     key_value = random_bytes(session, funcs, GOST_28147_KEY_SIZE)
     template, template_len = attributes_array(
         [
             (CKA_CLASS, CKO_SECRET_KEY),
             (CKA_LABEL, label),
+            (CKA_ID, key_id),
             (CKA_KEY_TYPE, CKK_GOST28147),
             (CKA_TOKEN, False),
             (CKA_PRIVATE, True),
-            (CKA_MODIFIABLE, True),
             (CKA_ENCRYPT, True),
             (CKA_DECRYPT, True),
             (CKA_GOST28147_PARAMS, GOST_28147_PARAMS),
             (CKA_VALUE, key_value),
-            (CKA_EXTRACTABLE, True),
-            (CKA_SENSITIVE, False),
         ]
     )
     key_handle = CK_OBJECT_HANDLE()
@@ -909,21 +908,18 @@ def wrap_cek(session, funcs, kek_handle, cek_handle, ukm):
 
 def unwrap_cek(session, funcs, kek_handle, wrapped_key, ukm, mode_info):
     label = make_random_label("gost28147-cek")
+    key_id = random_bytes(session, funcs, 16)
     template_items = [
         (CKA_CLASS, CKO_SECRET_KEY),
         (CKA_LABEL, label),
+        (CKA_ID, key_id),
         (CKA_KEY_TYPE, CKK_GOST28147),
         (CKA_TOKEN, mode_info["cka_token"]),
         (CKA_PRIVATE, True),
-        (CKA_MODIFIABLE, True),
         (CKA_ENCRYPT, True),
         (CKA_DECRYPT, True),
         (CKA_GOST28147_PARAMS, GOST_28147_PARAMS),
     ]
-    if mode_info["mode"] == "software":
-        template_items.extend([(CKA_EXTRACTABLE, True), (CKA_SENSITIVE, False)])
-    else:
-        template_items.extend([(CKA_EXTRACTABLE, False), (CKA_SENSITIVE, True)])
     template, template_len = attributes_array(template_items)
     wrapped_buffer = (CK_BYTE * len(wrapped_key)).from_buffer_copy(wrapped_key)
     last_error = None
