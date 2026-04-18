@@ -838,8 +838,8 @@ def derive_kek(session, funcs, pair):
             (CKA_ENCRYPT, True),
             (CKA_DECRYPT, True),
             (CKA_GOST28147_PARAMS, GOST_28147_PARAMS),
-            (CKA_EXTRACTABLE, False),
-            (CKA_SENSITIVE, True),
+            (CKA_EXTRACTABLE, True),
+            (CKA_SENSITIVE, False),
         ]
     )
     kek_handle = CK_OBJECT_HANDLE()
