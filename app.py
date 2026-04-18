@@ -872,6 +872,8 @@ def create_source_cek(session, funcs, mode_info):
             (CKA_DECRYPT, True),
             (CKA_GOST28147_PARAMS, GOST_28147_PARAMS),
             (CKA_VALUE, key_value),
+            (CKA_EXTRACTABLE, True),
+            (CKA_SENSITIVE, False),
         ]
     )
     key_handle = CK_OBJECT_HANDLE()
