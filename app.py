@@ -867,6 +867,9 @@ def create_source_cek(session, funcs, mode_info):
             (CKA_TOKEN, False),
             (CKA_PRIVATE, True),
             (CKA_MODIFIABLE, True),
+            (CKA_ENCRYPT, True),
+            (CKA_DECRYPT, True),
+            (CKA_GOST28147_PARAMS, GOST_28147_PARAMS),
             (CKA_VALUE, key_value),
             (CKA_EXTRACTABLE, True),
             (CKA_SENSITIVE, False),
@@ -913,6 +916,9 @@ def unwrap_cek(session, funcs, kek_handle, wrapped_key, ukm, mode_info):
         (CKA_TOKEN, mode_info["cka_token"]),
         (CKA_PRIVATE, True),
         (CKA_MODIFIABLE, True),
+        (CKA_ENCRYPT, True),
+        (CKA_DECRYPT, True),
+        (CKA_GOST28147_PARAMS, GOST_28147_PARAMS),
     ]
     if mode_info["mode"] == "software":
         template_items.extend([(CKA_EXTRACTABLE, True), (CKA_SENSITIVE, False)])
