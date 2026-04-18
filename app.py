@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 
-APP_VERSION = "v0.3"
+APP_VERSION = "v1.0"
 CK_RV = ctypes.c_ulong
 CK_VOID_PTR = ctypes.c_void_p
 CK_ULONG = ctypes.c_ulong
@@ -17,17 +17,12 @@ CK_SESSION_HANDLE = CK_ULONG
 CK_OBJECT_HANDLE = CK_ULONG
 CK_FLAGS = CK_ULONG
 CK_USER_TYPE = CK_ULONG
-CK_OBJECT_CLASS = CK_ULONG
-CK_KEY_TYPE = CK_ULONG
 CK_MECHANISM_TYPE = CK_ULONG
 CK_BBOOL = ctypes.c_ubyte
-CK_UTF8CHAR = ctypes.c_ubyte
-CK_UTF8CHAR_PTR = ctypes.POINTER(CK_UTF8CHAR)
 CK_BYTE = ctypes.c_ubyte
 CK_BYTE_PTR = ctypes.POINTER(CK_BYTE)
 CK_ATTRIBUTE_TYPE = CK_ULONG
 PACK = 1 if platform.system() == "Windows" else 0
-FUNCTYPE = ctypes.CFUNCTYPE
 
 
 CKF_RW_SESSION = 0x00000002
@@ -43,38 +38,26 @@ CKM_SHA256_RSA_PKCS = 0x00000040
 
 CKA_CLASS = 0x00000000
 CKA_TOKEN = 0x00000001
-CKA_LABEL = 0x00000003
-CKA_ID = 0x00000102
-CKA_KEY_TYPE = 0x00000100
 CKA_PRIVATE = 0x00000002
-CKA_MODULUS_BITS = 0x00000121
-CKA_PUBLIC_EXPONENT = 0x00000122
+CKA_LABEL = 0x00000003
 CKA_ENCRYPT = 0x00000104
-CKA_VERIFY = 0x0000010A
-CKA_WRAP = 0x00000110
-CKA_SENSITIVE = 0x00000103
 CKA_DECRYPT = 0x00000105
-CKA_SIGN = 0x00000108
-CKA_UNWRAP = 0x00000112
-CKA_EXTRACTABLE = 0x00000162
+CKA_KEY_TYPE = 0x00000100
+CKA_ID = 0x00000102
+CKA_MODULUS_BITS = 0x00000121
 
 CKR_OK = 0
-CKR_CANCEL = 0x00000001
-CKR_ARGUMENTS_BAD = 0x00000007
 CKR_ATTRIBUTE_TYPE_INVALID = 0x00000012
-CKR_ATTRIBUTE_VALUE_INVALID = 0x00000013
-CKR_BUFFER_TOO_SMALL = 0x00000150
 CKR_CRYPTOKI_ALREADY_INITIALIZED = 0x00000191
-CKR_GENERAL_ERROR = 0x00000005
-CKR_OBJECT_HANDLE_INVALID = 0x00000082
-CKR_OPERATION_NOT_INITIALIZED = 0x00000091
 CKR_PIN_INCORRECT = 0x000000A0
 CKR_SESSION_HANDLE_INVALID = 0x000000B3
-CKR_SLOT_ID_INVALID = 0x00000003
-CKR_TOKEN_NOT_PRESENT = 0x000000E0
 CKR_USER_ALREADY_LOGGED_IN = 0x00000100
 CKR_USER_NOT_LOGGED_IN = 0x00000101
 
+DEFAULT_PIN = "12345678"
+RSA_MODULUS_BITS = 2048
+FIND_OBJECTS_LIMIT = 128
+FIND_OBJECTS_BATCH = 16
 ATTR_UNAVAILABLE = (1 << (ctypes.sizeof(CK_ULONG) * 8)) - 1
 SAMPLE_FILE_NAMES = ["lorem-500kb.txt", str(Path("testdata") / "lorem-500kb.txt")]
 
@@ -171,7 +154,6 @@ class CK_FUNCTION_LIST(ctypes.Structure):
 
 
 CK_FUNCTION_LIST_PTR = ctypes.POINTER(CK_FUNCTION_LIST)
-C_GetFunctionList_Type = FUNCTYPE(CK_RV, ctypes.POINTER(CK_FUNCTION_LIST_PTR))
 
 
 def clean_text(value):
@@ -386,7 +368,8 @@ def find_objects(session, funcs, template_items, limit=32):
     try:
         objects = []
         while len(objects) < limit:
-            batch = (CK_OBJECT_HANDLE * min(16, limit - len(objects)))()
+            batch_size = min(FIND_OBJECTS_BATCH, limit - len(objects))
+            batch = (CK_OBJECT_HANDLE * batch_size)()
             found = CK_ULONG(0)
             rv = funcs["C_FindObjects"](session, batch, CK_ULONG(len(batch)), ctypes.byref(found))
             rv_ok(rv, "C_FindObjects")
@@ -407,8 +390,8 @@ def find_pairs(session, funcs, cka_id=None, cka_label=None):
     if cka_label:
         common.append((CKA_LABEL, cka_label))
 
-    public_objects = find_objects(session, funcs, [(CKA_CLASS, CKO_PUBLIC_KEY), *common], limit=128)
-    private_objects = find_objects(session, funcs, [(CKA_CLASS, CKO_PRIVATE_KEY), *common], limit=128)
+    public_objects = find_objects(session, funcs, [(CKA_CLASS, CKO_PUBLIC_KEY), *common], limit=FIND_OBJECTS_LIMIT)
+    private_objects = find_objects(session, funcs, [(CKA_CLASS, CKO_PRIVATE_KEY), *common], limit=FIND_OBJECTS_LIMIT)
 
     pairs = {}
     for key_name, handles in (("public", public_objects), ("private", private_objects)):
@@ -456,7 +439,7 @@ def login(funcs, session):
     pin = getpass.getpass("PIN токена: ")
     used_default_pin = False
     if pin == "":
-        pin = "12345678"
+        pin = DEFAULT_PIN
         used_default_pin = True
     pin_bytes = pin.encode("utf-8")
     rv = funcs["C_Login"](session, CK_USER_TYPE(CKU_USER), pin_bytes, CK_ULONG(len(pin_bytes)))
@@ -464,7 +447,7 @@ def login(funcs, session):
         return
     if rv == CKR_PIN_INCORRECT:
         if used_default_pin:
-            raise PKCS11Error("PIN не передан, автоматическая проверка 12345678 не подошла. Введите правильный PIN", rv)
+            raise PKCS11Error(f"PIN не передан, автоматическая проверка {DEFAULT_PIN} не подошла. Введите правильный PIN", rv)
         raise PKCS11Error("Неверный PIN", rv)
     raise PKCS11Error("C_Login", rv)
 
@@ -505,7 +488,7 @@ def generate_pair(session, funcs, slot_id):
         raise PKCS11Error("Токен не поддерживает CKM_RSA_PKCS_KEY_PAIR_GEN")
 
     mechanism_info = get_mechanism_info(funcs, slot_id, CKM_RSA_PKCS_KEY_PAIR_GEN)
-    modulus_bits = 2048
+    modulus_bits = RSA_MODULUS_BITS
     if not (int(mechanism_info.ulMinKeySize) <= modulus_bits <= int(mechanism_info.ulMaxKeySize)):
         raise PKCS11Error(
             f"Токен не поддерживает RSA-{modulus_bits} (доступно {int(mechanism_info.ulMinKeySize)}..{int(mechanism_info.ulMaxKeySize)})"
@@ -742,50 +725,38 @@ def get_mechanism_info(funcs, slot_id, mechanism_type):
     return info
 
 
+def run_with_session(funcs, slot_id, action, *, rw=False, login_required=False):
+    session = open_session(funcs, slot_id, rw=rw)
+    try:
+        if login_required:
+            login(funcs, session)
+        try:
+            action(session, funcs)
+        finally:
+            if login_required:
+                logout(funcs, session)
+    finally:
+        close_session(funcs, session)
+
+
 def run_menu(funcs, slot_id):
+    actions = {
+        "1": lambda: run_with_session(funcs, slot_id, find_pair_menu),
+        "2": lambda: run_with_session(funcs, slot_id, lambda session, api: generate_pair(session, api, slot_id), rw=True, login_required=True),
+        "3": lambda: run_with_session(funcs, slot_id, delete_pair, rw=True, login_required=True),
+        "4": lambda: run_with_session(funcs, slot_id, sign_file, rw=True, login_required=True),
+    }
+
     while True:
         choice = show_menu()
+        if choice == "0":
+            return
+        action = actions.get(choice)
+        if action is None:
+            print("Неизвестный пункт меню")
+            continue
         try:
-            if choice == "0":
-                return
-            if choice == "1":
-                session = open_session(funcs, slot_id, rw=False)
-                try:
-                    find_pair_menu(session, funcs)
-                finally:
-                    close_session(funcs, session)
-            elif choice == "2":
-                session = open_session(funcs, slot_id, rw=True)
-                try:
-                    login(funcs, session)
-                    try:
-                        generate_pair(session, funcs, slot_id)
-                    finally:
-                        logout(funcs, session)
-                finally:
-                    close_session(funcs, session)
-            elif choice == "3":
-                session = open_session(funcs, slot_id, rw=True)
-                try:
-                    login(funcs, session)
-                    try:
-                        delete_pair(session, funcs)
-                    finally:
-                        logout(funcs, session)
-                finally:
-                    close_session(funcs, session)
-            elif choice == "4":
-                session = open_session(funcs, slot_id, rw=True)
-                try:
-                    login(funcs, session)
-                    try:
-                        sign_file(session, funcs)
-                    finally:
-                        logout(funcs, session)
-                finally:
-                    close_session(funcs, session)
-            else:
-                print("Неизвестный пункт меню")
+            action()
         except PKCS11Error as error:
             print(f"Ошибка: {error}")
         except Exception as error:
