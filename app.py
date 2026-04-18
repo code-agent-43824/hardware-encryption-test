@@ -745,49 +745,55 @@ def get_mechanism_info(funcs, slot_id, mechanism_type):
 def run_menu(funcs, slot_id):
     while True:
         choice = show_menu()
-        if choice == "0":
-            return
-        if choice == "1":
-            session = open_session(funcs, slot_id, rw=False)
-            try:
-                find_pair_menu(session, funcs)
-            finally:
-                close_session(funcs, session)
-        elif choice == "2":
-            session = open_session(funcs, slot_id, rw=True)
-            try:
-                login(funcs, session)
+        try:
+            if choice == "0":
+                return
+            if choice == "1":
+                session = open_session(funcs, slot_id, rw=False)
                 try:
-                    generate_pair(session, funcs, slot_id)
+                    find_pair_menu(session, funcs)
                 finally:
-                    logout(funcs, session)
-            finally:
-                close_session(funcs, session)
-        elif choice == "3":
-            session = open_session(funcs, slot_id, rw=True)
-            try:
-                login(funcs, session)
+                    close_session(funcs, session)
+            elif choice == "2":
+                session = open_session(funcs, slot_id, rw=True)
                 try:
-                    delete_pair(session, funcs)
+                    login(funcs, session)
+                    try:
+                        generate_pair(session, funcs, slot_id)
+                    finally:
+                        logout(funcs, session)
                 finally:
-                    logout(funcs, session)
-            finally:
-                close_session(funcs, session)
-        elif choice == "4":
-            session = open_session(funcs, slot_id, rw=True)
-            try:
-                login(funcs, session)
+                    close_session(funcs, session)
+            elif choice == "3":
+                session = open_session(funcs, slot_id, rw=True)
                 try:
-                    sign_file(session, funcs)
+                    login(funcs, session)
+                    try:
+                        delete_pair(session, funcs)
+                    finally:
+                        logout(funcs, session)
                 finally:
-                    logout(funcs, session)
-            finally:
-                close_session(funcs, session)
-        else:
-            print("Неизвестный пункт меню")
+                    close_session(funcs, session)
+            elif choice == "4":
+                session = open_session(funcs, slot_id, rw=True)
+                try:
+                    login(funcs, session)
+                    try:
+                        sign_file(session, funcs)
+                    finally:
+                        logout(funcs, session)
+                finally:
+                    close_session(funcs, session)
+            else:
+                print("Неизвестный пункт меню")
+        except PKCS11Error as error:
+            print(f"Ошибка: {error}")
+        except Exception as error:
+            print(f"Неожиданная ошибка: {error}")
 
 
 def main():
+    print(f"Hello from hardware-encryption-test {APP_VERSION}")
     raw_library_path = input("Путь к PKCS#11 библиотеке [Enter для файла рядом с приложением]: ").strip().strip('"')
     library_path = resolve_library_path(raw_library_path)
     if not library_path.exists():
