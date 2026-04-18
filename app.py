@@ -863,54 +863,26 @@ def derive_kek(session, funcs, pair):
 
 def create_source_cek(session, funcs, mode_info):
     label = make_random_label("gost28147-cek-src")
-    if mode_info["mode"] == "software":
-        key_value = random_bytes(session, funcs, GOST_28147_KEY_SIZE)
-        template, template_len = attributes_array(
-            [
-                (CKA_CLASS, CKO_SECRET_KEY),
-                (CKA_LABEL, label),
-                (CKA_KEY_TYPE, CKK_GOST28147),
-                (CKA_TOKEN, False),
-                (CKA_PRIVATE, True),
-                (CKA_MODIFIABLE, True),
-                (CKA_ENCRYPT, True),
-                (CKA_DECRYPT, True),
-                (CKA_GOST28147_PARAMS, GOST_28147_PARAMS),
-                (CKA_VALUE, key_value),
-                (CKA_EXTRACTABLE, True),
-                (CKA_SENSITIVE, False),
-            ]
-        )
-        key_handle = CK_OBJECT_HANDLE()
-        rv = funcs["C_CreateObject"](session, template, CK_ULONG(template_len), ctypes.byref(key_handle))
-        rv_ok(rv, "C_CreateObject(software CEK)")
-        return key_handle, label
-
-    mechanism = CK_MECHANISM(CKM_GOST28147_KEY_GEN, None, CK_ULONG(0))
+    key_value = random_bytes(session, funcs, GOST_28147_KEY_SIZE)
     template, template_len = attributes_array(
         [
             (CKA_CLASS, CKO_SECRET_KEY),
             (CKA_LABEL, label),
             (CKA_KEY_TYPE, CKK_GOST28147),
-            (CKA_TOKEN, True),
+            (CKA_TOKEN, False),
             (CKA_PRIVATE, True),
             (CKA_MODIFIABLE, True),
             (CKA_ENCRYPT, True),
             (CKA_DECRYPT, True),
             (CKA_GOST28147_PARAMS, GOST_28147_PARAMS),
-            (CKA_EXTRACTABLE, False),
-            (CKA_SENSITIVE, True),
+            (CKA_VALUE, key_value),
+            (CKA_EXTRACTABLE, True),
+            (CKA_SENSITIVE, False),
         ]
     )
     key_handle = CK_OBJECT_HANDLE()
-    rv = funcs["C_GenerateKey"](
-        session,
-        ctypes.byref(mechanism),
-        template,
-        CK_ULONG(template_len),
-        ctypes.byref(key_handle),
-    )
-    rv_ok(rv, "C_GenerateKey(hardware CEK)")
+    rv = funcs["C_CreateObject"](session, template, CK_ULONG(template_len), ctypes.byref(key_handle))
+    rv_ok(rv, f"C_CreateObject(source CEK for {mode_info['mode']})")
     return key_handle, label
 
 
@@ -1071,7 +1043,8 @@ def encrypt_file(session, funcs, slot_id):
     avg_elapsed = total_elapsed / count if count else 0.0
     print_pair("Шифрование выполнено ключом", pair)
     print(f"Режим шифрования: {mode_info['name']}")
-    print(f"Метод размещения ключа: CKA_TOKEN={'TRUE' if mode_info['cka_token'] else 'FALSE'}")
+    print("Исходный CEK для wrap создаётся как session object: CKA_TOKEN=FALSE")
+    print(f"Финальный CEK после unwrap: CKA_TOKEN={'TRUE' if mode_info['cka_token'] else 'FALSE'}")
     print(f"Алгоритм KEK: VKO / CKM_GOSTR3410_12_DERIVE, KDF=0x{kek_info['kdf']:08X}")
     print(f"Размер publicData для VKO: {kek_info['public_data_len']} байт | UKM: {kek_info['ukm'].hex().upper()}")
     print(f"CEK получен через wrap/unwrap, механизм=0x{(wrap_mechanism_type or 0):08X}, размер wrapped CEK: {len(wrapped)} байт")
