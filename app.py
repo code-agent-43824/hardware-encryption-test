@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 
-APP_VERSION = "v1.0"
+APP_VERSION = "v2.0"
 CK_RV = ctypes.c_ulong
 CK_VOID_PTR = ctypes.c_void_p
 CK_ULONG = ctypes.c_ulong
@@ -32,9 +32,18 @@ CKU_USER = 1
 CKO_PUBLIC_KEY = 0x00000002
 CKO_PRIVATE_KEY = 0x00000003
 CKK_RSA = 0x00000000
+CKK_GOSTR3410 = 0x00000030
+CK_VENDOR_PKCS11_RU_TEAM_TC26 = 0xD4321000
+CKK_GOSTR3410_512 = CK_VENDOR_PKCS11_RU_TEAM_TC26 | 0x003
 
 CKM_RSA_PKCS_KEY_PAIR_GEN = 0x00000000
 CKM_SHA256_RSA_PKCS = 0x00000040
+CKM_GOSTR3410_KEY_PAIR_GEN = 0x00001200
+CKM_GOSTR3410_512_KEY_PAIR_GEN = CK_VENDOR_PKCS11_RU_TEAM_TC26 | 0x005
+CKM_GOSTR3410_WITH_GOSTR3411_12_256 = CK_VENDOR_PKCS11_RU_TEAM_TC26 | 0x008
+CKM_GOSTR3410_WITH_GOSTR3411_12_512 = CK_VENDOR_PKCS11_RU_TEAM_TC26 | 0x009
+CKM_GOSTR3411_12_256 = CK_VENDOR_PKCS11_RU_TEAM_TC26 | 0x012
+CKM_GOSTR3411_12_512 = CK_VENDOR_PKCS11_RU_TEAM_TC26 | 0x013
 
 CKA_CLASS = 0x00000000
 CKA_TOKEN = 0x00000001
@@ -42,9 +51,14 @@ CKA_PRIVATE = 0x00000002
 CKA_LABEL = 0x00000003
 CKA_ENCRYPT = 0x00000104
 CKA_DECRYPT = 0x00000105
+CKA_DERIVE = 0x0000010C
 CKA_KEY_TYPE = 0x00000100
 CKA_ID = 0x00000102
 CKA_MODULUS_BITS = 0x00000121
+CKA_START_DATE = 0x00000110
+CKA_END_DATE = 0x00000111
+CKA_GOSTR3410_PARAMS = 0x00000250
+CKA_GOSTR3411_PARAMS = 0x00000251
 
 CKR_OK = 0
 CKR_ATTRIBUTE_TYPE_INVALID = 0x00000012
@@ -60,6 +74,10 @@ FIND_OBJECTS_LIMIT = 128
 FIND_OBJECTS_BATCH = 16
 ATTR_UNAVAILABLE = (1 << (ctypes.sizeof(CK_ULONG) * 8)) - 1
 SAMPLE_FILE_NAMES = ["lorem-500kb.txt", str(Path("testdata") / "lorem-500kb.txt")]
+GOST_2012_256_PARAMS = bytes([0x06, 0x07, 0x2A, 0x85, 0x03, 0x02, 0x02, 0x23, 0x01])
+GOST_2012_512_PARAMS = bytes([0x06, 0x09, 0x2A, 0x85, 0x03, 0x07, 0x01, 0x02, 0x01, 0x02, 0x01])
+GOST_3411_2012_256_PARAMS = bytes([0x06, 0x08, 0x2A, 0x85, 0x03, 0x07, 0x01, 0x01, 0x02, 0x02])
+GOST_3411_2012_512_PARAMS = bytes([0x06, 0x08, 0x2A, 0x85, 0x03, 0x07, 0x01, 0x01, 0x02, 0x03])
 
 
 class PKCS11Error(Exception):
@@ -114,6 +132,16 @@ class CK_TOKEN_INFO(ctypes.Structure):
         ("hardwareVersion", CK_VERSION),
         ("firmwareVersion", CK_VERSION),
         ("utcTime", ctypes.c_char * 16),
+    ]
+
+
+class CK_DATE(ctypes.Structure):
+    if PACK:
+        _pack_ = PACK
+    _fields_ = [
+        ("year", ctypes.c_char * 4),
+        ("month", ctypes.c_char * 2),
+        ("day", ctypes.c_char * 2),
     ]
 
 
@@ -361,6 +389,16 @@ def print_pair(prefix, pair):
     print(f"{prefix}: cka_id={pair['id']} | cka_label={pair['label']} | algorithm=0x{algorithm:08X}")
 
 
+def pair_algorithm_name(algorithm):
+    if algorithm == CKK_RSA:
+        return "RSA-2048"
+    if algorithm == CKK_GOSTR3410:
+        return "ГОСТ Р 34.10-2012(256)"
+    if algorithm == CKK_GOSTR3410_512:
+        return "ГОСТ Р 34.10-2012(512)"
+    return f"0x{algorithm:08X}" if algorithm is not None else "неизвестно"
+
+
 def find_objects(session, funcs, template_items, limit=32):
     template, template_len = attributes_array(template_items)
     rv = funcs["C_FindObjectsInit"](session, template, CK_ULONG(template_len))
@@ -478,46 +516,116 @@ def choose_pair(pairs, prompt="Выберите номер пары [0]: ", defa
         print("Нет такого номера")
 
 
-def generate_pair(session, funcs, slot_id):
-    cka_id = prompt_non_empty("Введите cka_id: ")
-    cka_label = prompt_non_empty("Введите cka_label: ")
-    pair_id_value = bytes.fromhex(cka_id) if is_hex(cka_id) else cka_id.encode("utf-8")
+def choose_generation_type():
+    print("Какой тип ключевой пары создать?")
+    print("0) ГОСТ Р 34.10-2012(256)")
+    print("1) ГОСТ Р 34.10-2012(512)")
+    print("2) RSA-2048")
+    while True:
+        raw = input("Выберите тип [0]: ").strip()
+        if raw == "":
+            raw = "0"
+        if raw == "0":
+            return {
+                "name": "ГОСТ Р 34.10-2012(256)",
+                "key_type": CKK_GOSTR3410,
+                "mechanism": CKM_GOSTR3410_KEY_PAIR_GEN,
+                "public_params": GOST_2012_256_PARAMS,
+                "private_hash_params": GOST_3411_2012_256_PARAMS,
+                "required_mechanisms": [CKM_GOSTR3410_KEY_PAIR_GEN, CKM_GOSTR3411_12_256],
+            }
+        if raw == "1":
+            return {
+                "name": "ГОСТ Р 34.10-2012(512)",
+                "key_type": CKK_GOSTR3410_512,
+                "mechanism": CKM_GOSTR3410_512_KEY_PAIR_GEN,
+                "public_params": GOST_2012_512_PARAMS,
+                "private_hash_params": GOST_3411_2012_512_PARAMS,
+                "required_mechanisms": [CKM_GOSTR3410_512_KEY_PAIR_GEN, CKM_GOSTR3411_12_512],
+            }
+        if raw == "2":
+            return {"name": "RSA-2048", "key_type": CKK_RSA, "mechanism": CKM_RSA_PKCS_KEY_PAIR_GEN}
+        print("Введите 0, 1 или 2")
 
-    mechanisms = get_mechanism_list(funcs, slot_id)
-    if CKM_RSA_PKCS_KEY_PAIR_GEN not in mechanisms:
-        raise PKCS11Error("Токен не поддерживает CKM_RSA_PKCS_KEY_PAIR_GEN")
 
-    mechanism_info = get_mechanism_info(funcs, slot_id, CKM_RSA_PKCS_KEY_PAIR_GEN)
-    modulus_bits = RSA_MODULUS_BITS
-    if not (int(mechanism_info.ulMinKeySize) <= modulus_bits <= int(mechanism_info.ulMaxKeySize)):
-        raise PKCS11Error(
-            f"Токен не поддерживает RSA-{modulus_bits} (доступно {int(mechanism_info.ulMinKeySize)}..{int(mechanism_info.ulMaxKeySize)})"
-        )
-
-    public_template, public_len = attributes_array(
-        [
-            (CKA_CLASS, CKO_PUBLIC_KEY),
-            (CKA_LABEL, cka_label),
-            (CKA_ID, pair_id_value),
-            (CKA_KEY_TYPE, CKK_RSA),
-            (CKA_TOKEN, True),
-            (CKA_ENCRYPT, True),
-            (CKA_PRIVATE, False),
-            (CKA_MODULUS_BITS, modulus_bits),
-        ]
-    )
+def build_gost_key_templates(algorithm, cka_label, pair_id_value):
+    start_date = CK_DATE(b"2020", b"12", b"25")
+    end_date = CK_DATE(b"2030", b"12", b"25")
+    public_items = [
+        (CKA_CLASS, CKO_PUBLIC_KEY),
+        (CKA_LABEL, cka_label),
+        (CKA_ID, pair_id_value),
+        (CKA_KEY_TYPE, algorithm["key_type"]),
+        (CKA_TOKEN, True),
+        (CKA_PRIVATE, False),
+        (CKA_GOSTR3410_PARAMS, algorithm["public_params"]),
+    ]
+    if algorithm["key_type"] == CKK_GOSTR3410:
+        public_items.append((CKA_GOSTR3411_PARAMS, algorithm["private_hash_params"]))
+    public_template, public_len = attributes_array(public_items)
     private_template, private_len = attributes_array(
         [
             (CKA_CLASS, CKO_PRIVATE_KEY),
             (CKA_LABEL, cka_label),
             (CKA_ID, pair_id_value),
-            (CKA_KEY_TYPE, CKK_RSA),
-            (CKA_DECRYPT, True),
+            (CKA_KEY_TYPE, algorithm["key_type"]),
             (CKA_TOKEN, True),
             (CKA_PRIVATE, True),
+            (CKA_DERIVE, True),
+            (CKA_GOSTR3410_PARAMS, algorithm["public_params"]),
+            (CKA_GOSTR3411_PARAMS, algorithm["private_hash_params"]),
+            (CKA_START_DATE, (start_date, ctypes.sizeof(start_date))),
+            (CKA_END_DATE, (end_date, ctypes.sizeof(end_date))),
         ]
     )
-    mechanism = CK_MECHANISM(CKM_RSA_PKCS_KEY_PAIR_GEN, None, CK_ULONG(0))
+    return public_template, public_len, private_template, private_len
+
+
+def generate_pair(session, funcs, slot_id):
+    algorithm = choose_generation_type()
+    cka_id = prompt_non_empty("Введите cka_id: ")
+    cka_label = prompt_non_empty("Введите cka_label: ")
+    pair_id_value = bytes.fromhex(cka_id) if is_hex(cka_id) else cka_id.encode("utf-8")
+
+    mechanisms = get_mechanism_list(funcs, slot_id)
+    for mechanism_type in algorithm.get("required_mechanisms", [algorithm["mechanism"]]):
+        if mechanism_type not in mechanisms:
+            raise PKCS11Error(f"Токен не поддерживает механизм 0x{mechanism_type:08X} для {algorithm['name']}")
+
+    if algorithm["key_type"] == CKK_RSA:
+        mechanism_info = get_mechanism_info(funcs, slot_id, CKM_RSA_PKCS_KEY_PAIR_GEN)
+        modulus_bits = RSA_MODULUS_BITS
+        if not (int(mechanism_info.ulMinKeySize) <= modulus_bits <= int(mechanism_info.ulMaxKeySize)):
+            raise PKCS11Error(
+                f"Токен не поддерживает RSA-{modulus_bits} (доступно {int(mechanism_info.ulMinKeySize)}..{int(mechanism_info.ulMaxKeySize)})"
+            )
+        public_template, public_len = attributes_array(
+            [
+                (CKA_CLASS, CKO_PUBLIC_KEY),
+                (CKA_LABEL, cka_label),
+                (CKA_ID, pair_id_value),
+                (CKA_KEY_TYPE, CKK_RSA),
+                (CKA_TOKEN, True),
+                (CKA_ENCRYPT, True),
+                (CKA_PRIVATE, False),
+                (CKA_MODULUS_BITS, modulus_bits),
+            ]
+        )
+        private_template, private_len = attributes_array(
+            [
+                (CKA_CLASS, CKO_PRIVATE_KEY),
+                (CKA_LABEL, cka_label),
+                (CKA_ID, pair_id_value),
+                (CKA_KEY_TYPE, CKK_RSA),
+                (CKA_DECRYPT, True),
+                (CKA_TOKEN, True),
+                (CKA_PRIVATE, True),
+            ]
+        )
+    else:
+        public_template, public_len, private_template, private_len = build_gost_key_templates(algorithm, cka_label, pair_id_value)
+
+    mechanism = CK_MECHANISM(algorithm["mechanism"], None, CK_ULONG(0))
     public_key = CK_OBJECT_HANDLE()
     private_key = CK_OBJECT_HANDLE()
     rv = funcs["C_GenerateKeyPair"](
@@ -531,7 +639,18 @@ def generate_pair(session, funcs, slot_id):
         ctypes.byref(private_key),
     )
     rv_ok(rv, "C_GenerateKeyPair")
-    print(f"Пара создана: cka_id={cka_id} | cka_label={cka_label}")
+    print(f"Пара создана: cka_id={cka_id} | cka_label={cka_label} | type={algorithm['name']}")
+
+
+def signing_mechanism_for_pair(pair):
+    algorithm = pair.get("algorithm")
+    if algorithm == CKK_RSA:
+        return CK_MECHANISM(CKM_SHA256_RSA_PKCS, None, CK_ULONG(0))
+    if algorithm == CKK_GOSTR3410:
+        return CK_MECHANISM(CKM_GOSTR3410_WITH_GOSTR3411_12_256, None, CK_ULONG(0))
+    if algorithm == CKK_GOSTR3410_512:
+        return CK_MECHANISM(CKM_GOSTR3410_WITH_GOSTR3411_12_512, None, CK_ULONG(0))
+    raise PKCS11Error(f"Неподдерживаемый тип ключа для подписи: {pair_algorithm_name(algorithm)}")
 
 
 def delete_pair(session, funcs):
@@ -585,7 +704,7 @@ def sign_file(session, funcs):
 
     data = file_path.read_bytes()
     data_buffer = (CK_BYTE * len(data)).from_buffer_copy(data)
-    mechanism = CK_MECHANISM(CKM_SHA256_RSA_PKCS, None, CK_ULONG(0))
+    mechanism = signing_mechanism_for_pair(pair)
     signature_lengths = []
     last_signature_bytes = b""
     operation_times = []
@@ -620,6 +739,7 @@ def sign_file(session, funcs):
     signature_base64 = base64.b64encode(last_signature_bytes).decode("ascii") if last_signature_bytes else ""
 
     print_pair("Подпись выполнена ключом", pair)
+    print(f"Алгоритм подписи: {pair_algorithm_name(pair.get('algorithm'))}")
     print(f"Файл: {file_path}")
     print(f"Размер данных: {len(data)} байт")
     print(f"Количество подписаний: {count}")
