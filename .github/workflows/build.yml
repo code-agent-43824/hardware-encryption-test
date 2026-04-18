@@ -42,6 +42,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: |
-            ${{ matrix.binary_path }}
-            testdata/lorem-500kb.txt
+          path: ${{ matrix.binary_path }}

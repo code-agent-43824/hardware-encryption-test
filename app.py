@@ -1,12 +1,11 @@
 import ctypes
 import getpass
-import os
 import platform
 import sys
 from pathlib import Path
 
 
-APP_VERSION = "v0.2"
+APP_VERSION = "v0.3"
 CK_RV = ctypes.c_ulong
 CK_VOID_PTR = ctypes.c_void_p
 CK_ULONG = ctypes.c_ulong
@@ -74,7 +73,6 @@ CKR_USER_ALREADY_LOGGED_IN = 0x00000100
 CKR_USER_NOT_LOGGED_IN = 0x00000101
 
 ATTR_UNAVAILABLE = (1 << (ctypes.sizeof(CK_ULONG) * 8)) - 1
-SAMPLE_FILE = Path(__file__).resolve().parent / "testdata" / "lorem-500kb.txt"
 
 
 class PKCS11Error(Exception):
@@ -179,6 +177,27 @@ def load_library(path):
     if platform.system() == "Windows":
         return ctypes.WinDLL(path)
     return ctypes.CDLL(path)
+
+
+def app_dir():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def default_library_name():
+    system = platform.system()
+    if system == "Windows":
+        return "rtpkcs11ecp.dll"
+    if system == "Darwin":
+        return "librtpkcs11ecp.dylib"
+    return "librtpkcs11ecp.so"
+
+
+def resolve_library_path(raw_path):
+    if raw_path:
+        return Path(raw_path).expanduser()
+    return app_dir() / default_library_name()
 
 
 def bind_function(library, name, argtypes, restype=CK_RV):
@@ -418,34 +437,23 @@ def logout(funcs, session):
         raise PKCS11Error("C_Logout", rv)
 
 
-def prompt_filters():
-    raw_id = input("Введите cka_id (hex или строка, Enter чтобы пропустить): ").strip()
-    raw_label = input("Введите cka_label (Enter чтобы пропустить): ").strip()
-    if not raw_id and not raw_label:
-        print("Нужно указать хотя бы один фильтр")
-        return None, None
-    return raw_id or None, raw_label or None
-
-
-def choose_pair(pairs):
+def choose_pair(pairs, prompt="Выберите номер пары [0]: ", default_index=0):
     if not pairs:
         print("Пары не найдены")
         return None
-    if len(pairs) == 1:
-        print_pair("Найдена пара", pairs[0])
-        return pairs[0]
-    print("Найдено несколько пар:")
-    for index, pair in enumerate(pairs, start=1):
-        print_pair(f"  {index}", pair)
+    for index, pair in enumerate(pairs):
+        print_pair(str(index), pair)
     while True:
-        raw = input("Выберите номер пары: ").strip()
+        raw = input(prompt).strip()
+        if not raw:
+            return pairs[default_index]
         try:
             index = int(raw)
         except ValueError:
             print("Введите номер")
             continue
-        if 1 <= index <= len(pairs):
-            return pairs[index - 1]
+        if 0 <= index < len(pairs):
+            return pairs[index]
         print("Нет такого номера")
 
 
@@ -456,31 +464,26 @@ def generate_pair(session, funcs):
 
     public_template, public_len = attributes_array(
         [
-            (CKA_CLASS, CKO_PUBLIC_KEY),
-            (CKA_KEY_TYPE, CKK_RSA),
             (CKA_TOKEN, True),
-            (CKA_PRIVATE, False),
             (CKA_LABEL, cka_label),
             (CKA_ID, pair_id_value),
             (CKA_MODULUS_BITS, 2048),
             (CKA_PUBLIC_EXPONENT, b"\x01\x00\x01"),
-            (CKA_ENCRYPT, False),
+            (CKA_ENCRYPT, True),
             (CKA_VERIFY, True),
-            (CKA_WRAP, False),
+            (CKA_WRAP, True),
         ]
     )
     private_template, private_len = attributes_array(
         [
-            (CKA_CLASS, CKO_PRIVATE_KEY),
-            (CKA_KEY_TYPE, CKK_RSA),
             (CKA_TOKEN, True),
             (CKA_PRIVATE, True),
             (CKA_LABEL, cka_label),
             (CKA_ID, pair_id_value),
             (CKA_SENSITIVE, True),
-            (CKA_DECRYPT, False),
+            (CKA_DECRYPT, True),
             (CKA_SIGN, True),
-            (CKA_UNWRAP, False),
+            (CKA_UNWRAP, True),
             (CKA_EXTRACTABLE, False),
         ]
     )
@@ -502,10 +505,11 @@ def generate_pair(session, funcs):
 
 
 def delete_pair(session, funcs):
-    cka_id, cka_label = prompt_filters()
-    if not cka_id and not cka_label:
+    pairs = find_pairs(session, funcs)
+    if not pairs:
+        print("Пары не найдены")
         return
-    pair = choose_pair(find_pairs(session, funcs, cka_id, cka_label))
+    pair = choose_pair(pairs, prompt="Какую пару удалить? [0]: ")
     if not pair:
         return
     print_pair("Удаляем пару", pair)
@@ -522,29 +526,29 @@ def delete_pair(session, funcs):
 
 
 def find_pair_menu(session, funcs):
-    cka_id, cka_label = prompt_filters()
-    if not cka_id and not cka_label:
-        return
-    pairs = find_pairs(session, funcs, cka_id, cka_label)
+    pairs = find_pairs(session, funcs)
     if not pairs:
         print("Пары не найдены")
         return
-    for index, pair in enumerate(pairs, start=1):
-        print_pair(f"Пара {index}", pair)
+    for index, pair in enumerate(pairs):
+        print_pair(str(index), pair)
 
 
 def sign_file(session, funcs):
-    default_path = str(SAMPLE_FILE)
-    raw_path = input(f"Что подписать? [{default_path}]: ").strip().strip('"')
-    file_path = Path(raw_path or default_path)
+    raw_path = input("Что подписать? ").strip().strip('"')
+    if not raw_path:
+        print("Нужно указать путь к файлу")
+        return
+    file_path = Path(raw_path).expanduser()
     if not file_path.exists():
         print("Файл не найден")
         return
     count = prompt_count()
-    cka_id, cka_label = prompt_filters()
-    if not cka_id and not cka_label:
+    pairs = find_pairs(session, funcs)
+    if not pairs:
+        print("Пары не найдены")
         return
-    pair = choose_pair(find_pairs(session, funcs, cka_id, cka_label))
+    pair = choose_pair(pairs, prompt="Какой парой подписать? [0]: ")
     if not pair:
         return
     private_key = pair.get("private")
@@ -701,20 +705,17 @@ def run_menu(funcs, slot_id):
 
 def main():
     print(f"Hello from hardware-encryption-test {APP_VERSION}")
-    print(f"Файл 500 КБ по умолчанию: {SAMPLE_FILE}")
 
     funcs = None
     try:
-        path = input("Enter path to PKCS#11 library: ").strip().strip('"')
-        if not path:
-            print("No path provided")
+        raw_path = input("Enter path to PKCS#11 library: ").strip().strip('"')
+        library_path = resolve_library_path(raw_path)
+
+        if not library_path.exists():
+            print(f"Library not found: {library_path}")
             return
 
-        if not os.path.exists(path):
-            print("Library not found")
-            return
-
-        library = load_library(path)
+        library = load_library(str(library_path))
         funcs = prepare_functions(library)
         rv = funcs["C_Initialize"](None)
         if rv not in (CKR_OK, CKR_CRYPTOKI_ALREADY_INITIALIZED):
