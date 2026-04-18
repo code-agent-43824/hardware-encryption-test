@@ -41,10 +41,10 @@ CKK_GOSTR3410_512 = CK_VENDOR_PKCS11_RU_TEAM_TC26 | 0x003
 CKM_RSA_PKCS_KEY_PAIR_GEN = 0x00000000
 CKM_SHA256_RSA_PKCS = 0x00000040
 CKM_GOSTR3410_KEY_PAIR_GEN = 0x00001200
-CKM_GOST28147_KEY_GEN = 0x00001240
-CKM_GOST28147_ECB = 0x00001241
-CKM_GOST28147 = 0x00001242
-CKM_GOST28147_KEY_WRAP = 0x00001244
+CKM_GOST28147_KEY_GEN = 0x00001220
+CKM_GOST28147_ECB = 0x00001221
+CKM_GOST28147 = 0x00001222
+CKM_GOST28147_KEY_WRAP = 0x00001224
 CKM_GOSTR3410_512_KEY_PAIR_GEN = CK_VENDOR_PKCS11_RU_TEAM_TC26 | 0x005
 CKM_GOSTR3410_12_DERIVE = CK_VENDOR_PKCS11_RU_TEAM_TC26 | 0x007
 CKM_GOSTR3410_WITH_GOSTR3411_12_256 = CK_VENDOR_PKCS11_RU_TEAM_TC26 | 0x008
@@ -863,26 +863,54 @@ def derive_kek(session, funcs, pair):
 
 def create_source_cek(session, funcs, mode_info):
     label = make_random_label("gost28147-cek-src")
-    key_value = random_bytes(session, funcs, GOST_28147_KEY_SIZE)
+    if mode_info["mode"] == "software":
+        key_value = random_bytes(session, funcs, GOST_28147_KEY_SIZE)
+        template, template_len = attributes_array(
+            [
+                (CKA_CLASS, CKO_SECRET_KEY),
+                (CKA_LABEL, label),
+                (CKA_KEY_TYPE, CKK_GOST28147),
+                (CKA_TOKEN, False),
+                (CKA_PRIVATE, True),
+                (CKA_MODIFIABLE, True),
+                (CKA_ENCRYPT, True),
+                (CKA_DECRYPT, True),
+                (CKA_GOST28147_PARAMS, GOST_28147_PARAMS),
+                (CKA_VALUE, key_value),
+                (CKA_EXTRACTABLE, True),
+                (CKA_SENSITIVE, False),
+            ]
+        )
+        key_handle = CK_OBJECT_HANDLE()
+        rv = funcs["C_CreateObject"](session, template, CK_ULONG(template_len), ctypes.byref(key_handle))
+        rv_ok(rv, "C_CreateObject(software CEK)")
+        return key_handle, label
+
+    mechanism = CK_MECHANISM(CKM_GOST28147_KEY_GEN, None, CK_ULONG(0))
     template, template_len = attributes_array(
         [
             (CKA_CLASS, CKO_SECRET_KEY),
             (CKA_LABEL, label),
             (CKA_KEY_TYPE, CKK_GOST28147),
-            (CKA_TOKEN, mode_info["cka_token"]),
+            (CKA_TOKEN, True),
             (CKA_PRIVATE, True),
             (CKA_MODIFIABLE, True),
             (CKA_ENCRYPT, True),
             (CKA_DECRYPT, True),
             (CKA_GOST28147_PARAMS, GOST_28147_PARAMS),
-            (CKA_VALUE, key_value),
-            (CKA_EXTRACTABLE, True if mode_info["mode"] == "software" else False),
-            (CKA_SENSITIVE, False if mode_info["mode"] == "software" else True),
+            (CKA_EXTRACTABLE, False),
+            (CKA_SENSITIVE, True),
         ]
     )
     key_handle = CK_OBJECT_HANDLE()
-    rv = funcs["C_CreateObject"](session, template, CK_ULONG(template_len), ctypes.byref(key_handle))
-    rv_ok(rv, f"C_CreateObject({mode_info['mode']} CEK)")
+    rv = funcs["C_GenerateKey"](
+        session,
+        ctypes.byref(mechanism),
+        template,
+        CK_ULONG(template_len),
+        ctypes.byref(key_handle),
+    )
+    rv_ok(rv, "C_GenerateKey(hardware CEK)")
     return key_handle, label
 
 
