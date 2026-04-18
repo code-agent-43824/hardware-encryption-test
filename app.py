@@ -833,6 +833,8 @@ def derive_kek(session, funcs, pair, ukm_override=None):
             (CKA_TOKEN, False),
             (CKA_MODIFIABLE, True),
             (CKA_PRIVATE, True),
+            (CKA_WRAP, True),
+            (CKA_UNWRAP, True),
             (CKA_EXTRACTABLE, True),
             (CKA_SENSITIVE, False),
         ]
