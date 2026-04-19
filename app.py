@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 
-APP_VERSION = "v2.2"
+APP_VERSION = "v2.3"
 CK_RV = ctypes.c_ulong
 CK_VOID_PTR = ctypes.c_void_p
 CK_ULONG = ctypes.c_ulong
@@ -96,6 +96,8 @@ SAMPLE_FILE_NAMES = ["lorem-500kb.txt", str(Path("testdata") / "lorem-500kb.txt"
 GOST_28147_KEY_SIZE = 32
 GOST28147_89_BLOCK_SIZE = 8
 KUZNECHIK_BLOCK_SIZE = 16
+MAGMA_CTR_ACPKM_PARAM_SIZE = GOST28147_89_BLOCK_SIZE // 2
+KUZNECHIK_CTR_ACPKM_PARAM_SIZE = KUZNECHIK_BLOCK_SIZE // 2
 GOST_2012_256_PARAMS = bytes([0x06, 0x07, 0x2A, 0x85, 0x03, 0x02, 0x02, 0x23, 0x01])
 GOST_2012_512_PARAMS = bytes([0x06, 0x09, 0x2A, 0x85, 0x03, 0x07, 0x01, 0x02, 0x01, 0x02, 0x01])
 GOST_3411_2012_256_PARAMS = bytes([0x06, 0x08, 0x2A, 0x85, 0x03, 0x07, 0x01, 0x01, 0x02, 0x02])
@@ -447,7 +449,7 @@ def choose_encryption_algorithm():
                 "key_type": CKK_MAGMA,
                 "key_gen_mechanism": CKM_MAGMA_KEY_GEN,
                 "encrypt_mechanism": CKM_MAGMA_CTR_ACPKM,
-                "param_size": GOST28147_89_BLOCK_SIZE,
+                "param_size": MAGMA_CTR_ACPKM_PARAM_SIZE,
             }
         if raw == "1":
             return {
@@ -455,7 +457,7 @@ def choose_encryption_algorithm():
                 "key_type": CKK_KUZNECHIK,
                 "key_gen_mechanism": CKM_KUZNECHIK_KEY_GEN,
                 "encrypt_mechanism": CKM_KUZNECHIK_CTR_ACPKM,
-                "param_size": 12,
+                "param_size": KUZNECHIK_CTR_ACPKM_PARAM_SIZE,
             }
         if raw == "2":
             return {
@@ -824,11 +826,8 @@ def encrypt_with_generated_key(session, funcs, key_handle, algorithm, plaintext)
     rv_ok(rv, f"C_EncryptInit({algorithm['name']})")
 
     data_buffer = (CK_BYTE * len(plaintext)).from_buffer_copy(plaintext)
-    out_len = CK_ULONG(0)
-    rv = funcs["C_Encrypt"](session, data_buffer, CK_ULONG(len(plaintext)), None, ctypes.byref(out_len))
-    rv_ok(rv, f"C_Encrypt(size, {algorithm['name']})")
-
-    encrypted = (CK_BYTE * int(out_len.value))()
+    out_len = CK_ULONG(len(plaintext))
+    encrypted = (CK_BYTE * len(plaintext))()
     rv = funcs["C_Encrypt"](
         session,
         data_buffer,
@@ -838,6 +837,23 @@ def encrypt_with_generated_key(session, funcs, key_handle, algorithm, plaintext)
     )
     rv_ok(rv, f"C_Encrypt(data, {algorithm['name']})")
     return bytes(encrypted[: int(out_len.value)]), params, mechanism_keepalive
+
+
+def signature_buffer_length(session, funcs, pair):
+    algorithm = pair.get("algorithm")
+    if algorithm == CKK_RSA:
+        for handle in (pair.get("public"), pair.get("private")):
+            if not handle:
+                continue
+            modulus_bits = attr_ulong(session, funcs, handle, CKA_MODULUS_BITS)
+            if modulus_bits:
+                return int(modulus_bits) // 8
+        return RSA_MODULUS_BITS // 8
+    if algorithm == CKK_GOSTR3410:
+        return 64
+    if algorithm == CKK_GOSTR3410_512:
+        return 128
+    raise PKCS11Error(f"Неподдерживаемый тип ключа для подписи: {pair_algorithm_name(algorithm)}")
 
 
 def encrypt_file(session, funcs, slot_id):
@@ -953,6 +969,8 @@ def sign_file(session, funcs):
     data = file_path.read_bytes()
     data_buffer = (CK_BYTE * len(data)).from_buffer_copy(data)
     mechanism, mechanism_keepalive, hash_mode_name = signing_mechanism_for_pair(pair)
+    signature_capacity = signature_buffer_length(session, funcs, pair)
+    signature = (CK_BYTE * signature_capacity)()
     signature_lengths = []
     last_signature_bytes = b""
     operation_times = []
@@ -964,11 +982,7 @@ def sign_file(session, funcs):
         rv = funcs["C_SignInit"](session, ctypes.byref(mechanism), private_key)
         rv_ok(rv, "C_SignInit")
 
-        out_len = CK_ULONG(0)
-        rv = funcs["C_Sign"](session, data_buffer, CK_ULONG(len(data)), None, ctypes.byref(out_len))
-        rv_ok(rv, "C_Sign(size)")
-
-        signature = (CK_BYTE * int(out_len.value))()
+        out_len = CK_ULONG(signature_capacity)
         rv = funcs["C_Sign"](
             session,
             data_buffer,
@@ -1008,7 +1022,7 @@ def show_menu():
     print("2) сгенерировать ключевую пару")
     print("3) удалить ключевую пару")
     print("4) подписать 500 килобайт данных")
-    print("5) шифровать 500 кб данных")
+    print("5) шифровать 500 килобайт данных")
     print("0) выйти")
     return input("> ").strip()
 
@@ -1140,7 +1154,7 @@ def run_menu(funcs, slot_id):
 
 
 def main():
-    print(f"Hello from hardware-encryption-test {APP_VERSION}")
+    print(f"hardware-encryption-test {APP_VERSION}")
     raw_library_path = input("Путь к PKCS#11 библиотеке [Enter для файла рядом с приложением]: ").strip().strip('"')
     library_path = resolve_library_path(raw_library_path)
     if not library_path.exists():
