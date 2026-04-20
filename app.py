@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 
-APP_VERSION = "v2.3"
+APP_VERSION = "v2.4"
 CK_RV = ctypes.c_ulong
 CK_VOID_PTR = ctypes.c_void_p
 CK_ULONG = ctypes.c_ulong
@@ -96,8 +96,9 @@ SAMPLE_FILE_NAMES = ["lorem-500kb.txt", str(Path("testdata") / "lorem-500kb.txt"
 GOST_28147_KEY_SIZE = 32
 GOST28147_89_BLOCK_SIZE = 8
 KUZNECHIK_BLOCK_SIZE = 16
-MAGMA_CTR_ACPKM_PARAM_SIZE = GOST28147_89_BLOCK_SIZE // 2
-KUZNECHIK_CTR_ACPKM_PARAM_SIZE = KUZNECHIK_BLOCK_SIZE // 2
+MAGMA_CTR_ACPKM_IV_SIZE = GOST28147_89_BLOCK_SIZE // 2
+KUZNECHIK_CTR_ACPKM_IV_SIZE = KUZNECHIK_BLOCK_SIZE // 2
+CTR_ACPKM_PERIOD_SIZE = 4
 GOST_2012_256_PARAMS = bytes([0x06, 0x07, 0x2A, 0x85, 0x03, 0x02, 0x02, 0x23, 0x01])
 GOST_2012_512_PARAMS = bytes([0x06, 0x09, 0x2A, 0x85, 0x03, 0x07, 0x01, 0x02, 0x01, 0x02, 0x01])
 GOST_3411_2012_256_PARAMS = bytes([0x06, 0x08, 0x2A, 0x85, 0x03, 0x07, 0x01, 0x01, 0x02, 0x02])
@@ -449,7 +450,8 @@ def choose_encryption_algorithm():
                 "key_type": CKK_MAGMA,
                 "key_gen_mechanism": CKM_MAGMA_KEY_GEN,
                 "encrypt_mechanism": CKM_MAGMA_CTR_ACPKM,
-                "param_size": MAGMA_CTR_ACPKM_PARAM_SIZE,
+                "ctr_acpkm_iv_size": MAGMA_CTR_ACPKM_IV_SIZE,
+                "acpkm_period": 0,
             }
         if raw == "1":
             return {
@@ -457,7 +459,8 @@ def choose_encryption_algorithm():
                 "key_type": CKK_KUZNECHIK,
                 "key_gen_mechanism": CKM_KUZNECHIK_KEY_GEN,
                 "encrypt_mechanism": CKM_KUZNECHIK_CTR_ACPKM,
-                "param_size": KUZNECHIK_CTR_ACPKM_PARAM_SIZE,
+                "ctr_acpkm_iv_size": KUZNECHIK_CTR_ACPKM_IV_SIZE,
+                "acpkm_period": 0,
             }
         if raw == "2":
             return {
@@ -488,6 +491,14 @@ def mechanism_with_optional_param(mechanism_type, param_bytes=None):
         mechanism = CK_MECHANISM(mechanism_type, ctypes.cast(param_buffer, CK_VOID_PTR), CK_ULONG(len(param_bytes)))
         return mechanism, param_buffer
     return CK_MECHANISM(mechanism_type, None, CK_ULONG(0)), None
+
+
+def build_ctr_acpkm_params(iv_size, period=0, iv=None):
+    if iv is None:
+        iv = bytes(iv_size)
+    if len(iv) != iv_size:
+        raise PKCS11Error(f"Неверная длина синхропосылки CTR-ACPKM: ожидалось {iv_size}, получено {len(iv)}")
+    return int(period).to_bytes(CTR_ACPKM_PERIOD_SIZE, "big") + iv
 
 
 def print_pair(prefix, pair):
@@ -812,12 +823,21 @@ def generate_secret_key(session, funcs, algorithm, mode_info):
 
 
 def build_encryption_mechanism(session, funcs, algorithm):
+    mechanism_type = algorithm["encrypt_mechanism"]
+    if mechanism_type in {CKM_KUZNECHIK_CTR_ACPKM, CKM_MAGMA_CTR_ACPKM}:
+        params = build_ctr_acpkm_params(
+            algorithm["ctr_acpkm_iv_size"],
+            algorithm.get("acpkm_period", 0),
+        )
+        mechanism, keepalive = mechanism_with_optional_param(mechanism_type, params)
+        return mechanism, keepalive, params
+
     param_size = algorithm.get("param_size", 0)
     if param_size:
         params = random_bytes(session, funcs, param_size)
-        mechanism, keepalive = mechanism_with_optional_param(algorithm["encrypt_mechanism"], params)
+        mechanism, keepalive = mechanism_with_optional_param(mechanism_type, params)
         return mechanism, keepalive, params
-    return CK_MECHANISM(algorithm["encrypt_mechanism"], None, CK_ULONG(0)), None, b""
+    return CK_MECHANISM(mechanism_type, None, CK_ULONG(0)), None, b""
 
 
 def encrypt_with_generated_key(session, funcs, key_handle, algorithm, plaintext):
