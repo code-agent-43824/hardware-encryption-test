@@ -90,6 +90,7 @@ CKR_SESSION_HANDLE_INVALID = 0x000000B3
 CKR_USER_ALREADY_LOGGED_IN = 0x00000100
 CKR_USER_NOT_LOGGED_IN = 0x00000101
 
+DEFAULT_PIN = "12345678"
 DEFAULT_WARMUP_COUNT = 3
 MAX_WARMUP_COUNT = 1000
 MACOS_DEFAULT_LIBRARY_PATH = Path("/usr/local/lib/librtpkcs11ecp.dylib")
@@ -724,9 +725,11 @@ def close_session(funcs, session):
 
 
 def login(funcs, session):
-    pin = getpass.getpass("PIN токена: ")
+    pin = getpass.getpass(f"PIN токена [Enter: {DEFAULT_PIN}]: ")
+    used_default_pin = False
     if pin == "":
-        raise PKCS11Error("PIN не введён; автоматическая подстановка демонстрационного PIN отключена")
+        pin = DEFAULT_PIN
+        used_default_pin = True
     pin_bytes = pin.encode("utf-8")
     rv = funcs["C_Login"](session, CK_USER_TYPE(CKU_USER), pin_bytes, CK_ULONG(len(pin_bytes)))
     if rv == CKR_OK:
@@ -734,6 +737,11 @@ def login(funcs, session):
     if rv == CKR_USER_ALREADY_LOGGED_IN:
         return False
     if rv == CKR_PIN_INCORRECT:
+        if used_default_pin:
+            raise PKCS11Error(
+                f"PIN не введён, PIN по умолчанию {DEFAULT_PIN} не подошёл. Введите правильный PIN",
+                rv,
+            )
         raise PKCS11Error("Неверный PIN", rv)
     raise PKCS11Error("C_Login", rv)
 
