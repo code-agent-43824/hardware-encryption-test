@@ -5,11 +5,10 @@ import platform
 import secrets
 import sys
 import textwrap
-import time
 from pathlib import Path
 
 
-APP_VERSION = "v2.7"
+APP_VERSION = "v2.8"
 CK_RV = ctypes.c_ulong
 CK_VOID_PTR = ctypes.c_void_p
 CK_ULONG = ctypes.c_ulong
@@ -46,7 +45,6 @@ CKM_SHA256_RSA_PKCS = 0x00000040
 CKM_GOSTR3410_KEY_PAIR_GEN = 0x00001200
 CKM_GOSTR3410 = 0x00001201
 CKM_GOST28147_KEY_GEN = 0x00001220
-CKM_GOST28147_ECB = 0x00001221
 CKM_GOST28147 = 0x00001222
 CKM_GOSTR3410_512_KEY_PAIR_GEN = CK_VENDOR_PKCS11_RU_TEAM_TC26 | 0x005
 CKM_GOSTR3410_512 = CK_VENDOR_PKCS11_RU_TEAM_TC26 | 0x006
@@ -63,20 +61,12 @@ CKA_CLASS = 0x00000000
 CKA_TOKEN = 0x00000001
 CKA_PRIVATE = 0x00000002
 CKA_LABEL = 0x00000003
-CKA_VALUE = 0x00000011
-CKA_MODIFIABLE = 0x00000170
 CKA_ENCRYPT = 0x00000104
 CKA_DECRYPT = 0x00000105
-CKA_WRAP = 0x00000106
-CKA_UNWRAP = 0x00000107
 CKA_DERIVE = 0x0000010C
-CKA_SENSITIVE = 0x00000103
 CKA_KEY_TYPE = 0x00000100
 CKA_ID = 0x00000102
 CKA_MODULUS_BITS = 0x00000121
-CKA_START_DATE = 0x00000110
-CKA_END_DATE = 0x00000111
-CKA_EXTRACTABLE = 0x00000162
 CKA_GOSTR3410_PARAMS = 0x00000250
 CKA_GOSTR3411_PARAMS = 0x00000251
 CKA_GOST28147_PARAMS = 0x00000252
@@ -84,7 +74,6 @@ CKA_GOST28147_PARAMS = 0x00000252
 CKR_OK = 0
 CKR_ATTRIBUTE_TYPE_INVALID = 0x00000012
 CKR_CRYPTOKI_ALREADY_INITIALIZED = 0x00000191
-CKR_MECHANISM_INVALID = 0x00000070
 CKR_PIN_INCORRECT = 0x000000A0
 CKR_SESSION_HANDLE_INVALID = 0x000000B3
 CKR_USER_ALREADY_LOGGED_IN = 0x00000100
@@ -100,7 +89,6 @@ FIND_OBJECTS_LIMIT = 128
 FIND_OBJECTS_BATCH = 16
 ATTR_UNAVAILABLE = (1 << (ctypes.sizeof(CK_ULONG) * 8)) - 1
 SAMPLE_FILE_NAMES = ["lorem-500kb.txt", str(Path("testdata") / "lorem-500kb.txt")]
-GOST_28147_KEY_SIZE = 32
 GOST28147_89_BLOCK_SIZE = 8
 KUZNECHIK_BLOCK_SIZE = 16
 GOST28147_IV_SIZE = GOST28147_89_BLOCK_SIZE
@@ -170,16 +158,6 @@ class CK_TOKEN_INFO(ctypes.Structure):
     ]
 
 
-class CK_DATE(ctypes.Structure):
-    if PACK:
-        _pack_ = PACK
-    _fields_ = [
-        ("year", ctypes.c_char * 4),
-        ("month", ctypes.c_char * 2),
-        ("day", ctypes.c_char * 2),
-    ]
-
-
 class CK_ATTRIBUTE(ctypes.Structure):
     if PACK:
         _pack_ = PACK
@@ -208,15 +186,6 @@ class CK_MECHANISM_INFO(ctypes.Structure):
         ("ulMaxKeySize", CK_ULONG),
         ("flags", CK_FLAGS),
     ]
-
-
-class CK_FUNCTION_LIST(ctypes.Structure):
-    if PACK:
-        _pack_ = PACK
-    pass
-
-
-CK_FUNCTION_LIST_PTR = ctypes.POINTER(CK_FUNCTION_LIST)
 
 
 def clean_text(value):
@@ -403,24 +372,55 @@ def display_id(value):
     return value.hex().upper()
 
 
-def attr_id(session, funcs, obj_handle):
-    return display_id(attr_bytes(session, funcs, obj_handle, CKA_ID))
-
-
-KEY_TYPE_CONSTANTS = {
-    CKK_RSA: "CKK_RSA",
-    CKK_GOSTR3410: "CKK_GOSTR3410",
-    CKK_GOSTR3410_512: "CKK_GOSTR3410_512",
-    CKK_GOST28147: "CKK_GOST28147",
-    CKK_KUZNECHIK: "CKK_KUZNECHIK",
-    CKK_MAGMA: "CKK_MAGMA",
+KEY_TYPES = {
+    CKK_RSA: {
+        "constant": "CKK_RSA",
+        "name": "RSA-2048",
+        "sign_mechanism": CKM_SHA256_RSA_PKCS,
+        "hash_mode": "SHA-256",
+        "verify_mechanism": CKM_SHA256_RSA_PKCS,
+        "signature_size": RSA_MODULUS_BITS // 8,
+    },
+    CKK_GOSTR3410: {
+        "constant": "CKK_GOSTR3410",
+        "name": "ГОСТ Р 34.10-2012(256)",
+        "sign_mechanism": CKM_GOSTR3410_WITH_GOSTR3411_12_256,
+        "sign_params": GOST_3411_2012_256_PARAMS,
+        "hash_mode": "ГОСТ Р 34.11-2012(256), совместный механизм хеширования и подписи",
+        "verify_mechanism": CKM_GOSTR3410,
+        "digest_mechanism": CKM_GOSTR3411_12_256,
+        "digest_size": 32,
+        "signature_size": 64,
+    },
+    CKK_GOSTR3410_512: {
+        "constant": "CKK_GOSTR3410_512",
+        "name": "ГОСТ Р 34.10-2012(512)",
+        "sign_mechanism": CKM_GOSTR3410_WITH_GOSTR3411_12_512,
+        "sign_params": GOST_3411_2012_512_PARAMS,
+        "hash_mode": "ГОСТ Р 34.11-2012(512), совместный механизм хеширования и подписи",
+        "verify_mechanism": CKM_GOSTR3410_512,
+        "digest_mechanism": CKM_GOSTR3411_12_512,
+        "digest_size": 64,
+        "signature_size": 128,
+    },
+    CKK_GOST28147: {"constant": "CKK_GOST28147", "name": "ГОСТ 28147-89"},
+    CKK_KUZNECHIK: {"constant": "CKK_KUZNECHIK", "name": "Кузнечик"},
+    CKK_MAGMA: {"constant": "CKK_MAGMA", "name": "Магма"},
 }
 
 
 def key_type_constant_name(algorithm):
     if algorithm is None:
         return "CKK_UNKNOWN"
-    return KEY_TYPE_CONSTANTS.get(algorithm, f"CKK_UNKNOWN(0x{algorithm:08X})")
+    info = KEY_TYPES.get(algorithm)
+    return info["constant"] if info else f"CKK_UNKNOWN(0x{algorithm:08X})"
+
+
+def pair_algorithm_name(algorithm):
+    info = KEY_TYPES.get(algorithm)
+    if info:
+        return info["name"]
+    return f"0x{algorithm:08X}" if algorithm is not None else "неизвестно"
 
 
 def prompt_non_empty(label):
@@ -431,22 +431,9 @@ def prompt_non_empty(label):
         print("Значение не должно быть пустым")
 
 
-def prompt_count():
+def prompt_operation_count(action):
     while True:
-        raw = input("Сколько раз подписать? [1-10000]: ").strip()
-        try:
-            count = int(raw)
-        except ValueError:
-            print("Введите целое число")
-            continue
-        if 1 <= count <= 10000:
-            return count
-        print("Допустим диапазон от 1 до 10000")
-
-
-def prompt_encrypt_count():
-    while True:
-        raw = input("Сколько раз зашифровать? [1-10000]: ").strip()
+        raw = input(f"Сколько раз {action}? [1-10000]: ").strip()
         try:
             count = int(raw)
         except ValueError:
@@ -472,62 +459,128 @@ def prompt_warmup_count():
         print(f"Допустим диапазон от 0 до {MAX_WARMUP_COUNT}")
 
 
-def choose_crypto_mode():
+CRYPTO_MODES = (
+    {
+        "choice": "0",
+        "menu_label": "программно, ключ в памяти библиотеки",
+        "mode": "software",
+        "name": "программное",
+        "cka_token": False,
+    },
+    {
+        "choice": "1",
+        "menu_label": "аппаратно, ключ на токене",
+        "mode": "hardware",
+        "name": "аппаратное",
+        "cka_token": True,
+    },
+)
+
+ENCRYPTION_ALGORITHMS = (
+    {
+        "choice": "0",
+        "menu_label": "Магма",
+        "name": "Магма",
+        "key_type": CKK_MAGMA,
+        "key_gen_mechanism": CKM_MAGMA_KEY_GEN,
+        "encrypt_mechanism": CKM_MAGMA_CTR_ACPKM,
+        "ctr_acpkm_iv_size": MAGMA_CTR_ACPKM_IV_SIZE,
+        "acpkm_period": CTR_ACPKM_PERIOD_BITS,
+    },
+    {
+        "choice": "1",
+        "menu_label": "Кузнечик",
+        "name": "Кузнечик",
+        "key_type": CKK_KUZNECHIK,
+        "key_gen_mechanism": CKM_KUZNECHIK_KEY_GEN,
+        "encrypt_mechanism": CKM_KUZNECHIK_CTR_ACPKM,
+        "ctr_acpkm_iv_size": KUZNECHIK_CTR_ACPKM_IV_SIZE,
+        "acpkm_period": CTR_ACPKM_PERIOD_BITS,
+    },
+    {
+        "choice": "2",
+        "menu_label": "ГОСТ 28147-89 (режим гаммирования)",
+        "name": "ГОСТ 28147-89",
+        "key_type": CKK_GOST28147,
+        "key_gen_mechanism": CKM_GOST28147_KEY_GEN,
+        "encrypt_mechanism": CKM_GOST28147,
+        "iv_size": GOST28147_IV_SIZE,
+        "gost28147_params": GOST_28147_PARAMS,
+    },
+)
+
+KEY_PAIR_ALGORITHMS = (
+    {
+        "choice": "0",
+        "menu_label": "ГОСТ Р 34.10-2012(256)",
+        "name": "ГОСТ Р 34.10-2012(256)",
+        "key_type": CKK_GOSTR3410,
+        "mechanism": CKM_GOSTR3410_KEY_PAIR_GEN,
+        "required_mechanisms": (CKM_GOSTR3410_KEY_PAIR_GEN, CKM_GOSTR3411_12_256),
+        "public_attributes": (
+            (CKA_GOSTR3410_PARAMS, GOST_2012_256_PARAMS),
+            (CKA_GOSTR3411_PARAMS, GOST_3411_2012_256_PARAMS),
+        ),
+        "private_attributes": (
+            (CKA_DERIVE, True),
+            (CKA_GOSTR3410_PARAMS, GOST_2012_256_PARAMS),
+            (CKA_GOSTR3411_PARAMS, GOST_3411_2012_256_PARAMS),
+        ),
+    },
+    {
+        "choice": "1",
+        "menu_label": "ГОСТ Р 34.10-2012(512)",
+        "name": "ГОСТ Р 34.10-2012(512)",
+        "key_type": CKK_GOSTR3410_512,
+        "mechanism": CKM_GOSTR3410_512_KEY_PAIR_GEN,
+        "required_mechanisms": (CKM_GOSTR3410_512_KEY_PAIR_GEN, CKM_GOSTR3411_12_512),
+        "public_attributes": (
+            (CKA_GOSTR3410_PARAMS, GOST_2012_512_PARAMS),
+            (CKA_GOSTR3411_PARAMS, GOST_3411_2012_512_PARAMS),
+        ),
+        "private_attributes": (
+            (CKA_DERIVE, True),
+            (CKA_GOSTR3410_PARAMS, GOST_2012_512_PARAMS),
+            (CKA_GOSTR3411_PARAMS, GOST_3411_2012_512_PARAMS),
+        ),
+    },
+    {
+        "choice": "2",
+        "menu_label": "RSA-2048",
+        "name": "RSA-2048",
+        "key_type": CKK_RSA,
+        "mechanism": CKM_RSA_PKCS_KEY_PAIR_GEN,
+        "required_mechanisms": (CKM_RSA_PKCS_KEY_PAIR_GEN,),
+        "modulus_bits": RSA_MODULUS_BITS,
+        "public_attributes": ((CKA_ENCRYPT, True), (CKA_MODULUS_BITS, RSA_MODULUS_BITS)),
+        "private_attributes": ((CKA_DECRYPT, True),),
+    },
+)
+
+
+def choose_menu_option(title, options, prompt, invalid_message):
+    print(title)
+    for option in options:
+        print(f"{option['choice']}) {option['menu_label']}")
+    by_choice = {option["choice"]: option for option in options}
     while True:
-        print("Как шифровать?")
-        print("0) программно, ключ в памяти библиотеки")
-        print("1) аппаратно, ключ на токене")
-        raw = input("Выберите режим [0]: ").strip()
-        if raw == "":
-            raw = "0"
-        if raw == "0":
-            return {"mode": "software", "name": "программное", "cka_token": False}
-        if raw == "1":
-            return {"mode": "hardware", "name": "аппаратное", "cka_token": True}
-        print("Введите 0 или 1")
+        raw = input(prompt).strip() or "0"
+        if raw in by_choice:
+            return by_choice[raw]
+        print(invalid_message)
+
+
+def choose_crypto_mode():
+    return choose_menu_option("Как шифровать?", CRYPTO_MODES, "Выберите режим [0]: ", "Введите 0 или 1")
 
 
 def choose_encryption_algorithm():
-    while True:
-        print("Какой алгоритм шифрования использовать?")
-        print("0) Магма")
-        print("1) Кузнечик")
-        print("2) ГОСТ 28147-89 (режим гаммирования)")
-        raw = input("Выберите алгоритм [0]: ").strip()
-        if raw == "":
-            raw = "0"
-        if raw == "0":
-            return {
-                "name": "Магма",
-                "key_type": CKK_MAGMA,
-                "key_gen_mechanism": CKM_MAGMA_KEY_GEN,
-                "encrypt_mechanism": CKM_MAGMA_CTR_ACPKM,
-                "ctr_acpkm_iv_size": MAGMA_CTR_ACPKM_IV_SIZE,
-                "acpkm_period": CTR_ACPKM_PERIOD_BITS,
-            }
-        if raw == "1":
-            return {
-                "name": "Кузнечик",
-                "key_type": CKK_KUZNECHIK,
-                "key_gen_mechanism": CKM_KUZNECHIK_KEY_GEN,
-                "encrypt_mechanism": CKM_KUZNECHIK_CTR_ACPKM,
-                "ctr_acpkm_iv_size": KUZNECHIK_CTR_ACPKM_IV_SIZE,
-                "acpkm_period": CTR_ACPKM_PERIOD_BITS,
-            }
-        if raw == "2":
-            return {
-                "name": "ГОСТ 28147-89",
-                "key_type": CKK_GOST28147,
-                "key_gen_mechanism": CKM_GOST28147_KEY_GEN,
-                "encrypt_mechanism": CKM_GOST28147,
-                "iv_size": GOST28147_IV_SIZE,
-                "gost28147_params": GOST_28147_PARAMS,
-            }
-        print("Введите 0, 1 или 2")
-
-
-def make_random_label(prefix):
-    return f"{prefix}-{int(time.time() * 1000)}"
+    return choose_menu_option(
+        "Какой алгоритм шифрования использовать?",
+        ENCRYPTION_ALGORITHMS,
+        "Выберите алгоритм [0]: ",
+        "Введите 0, 1 или 2",
+    )
 
 
 def random_bytes(session, funcs, size):
@@ -564,16 +617,6 @@ def print_pair(prefix, pair):
         f"{prefix}: cka_id={pair['id']} | cka_label={pair['label']} | "
         f"algorithm={key_type_constant_name(algorithm)} ({pair_algorithm_name(algorithm)}){duplicate}"
     )
-
-
-def pair_algorithm_name(algorithm):
-    if algorithm == CKK_RSA:
-        return "RSA-2048"
-    if algorithm == CKK_GOSTR3410:
-        return "ГОСТ Р 34.10-2012(256)"
-    if algorithm == CKK_GOSTR3410_512:
-        return "ГОСТ Р 34.10-2012(512)"
-    return f"0x{algorithm:08X}" if algorithm is not None else "неизвестно"
 
 
 def find_objects(session, funcs, template_items, limit=32):
@@ -773,40 +816,15 @@ def choose_pair(pairs, prompt="Выберите номер пары [0]: ", defa
 
 
 def choose_generation_type():
-    print("Какой тип ключевой пары создать?")
-    print("0) ГОСТ Р 34.10-2012(256)")
-    print("1) ГОСТ Р 34.10-2012(512)")
-    print("2) RSA-2048")
-    while True:
-        raw = input("Выберите тип [0]: ").strip()
-        if raw == "":
-            raw = "0"
-        if raw == "0":
-            return {
-                "name": "ГОСТ Р 34.10-2012(256)",
-                "key_type": CKK_GOSTR3410,
-                "mechanism": CKM_GOSTR3410_KEY_PAIR_GEN,
-                "public_params": GOST_2012_256_PARAMS,
-                "private_hash_params": GOST_3411_2012_256_PARAMS,
-                "required_mechanisms": [CKM_GOSTR3410_KEY_PAIR_GEN, CKM_GOSTR3411_12_256],
-            }
-        if raw == "1":
-            return {
-                "name": "ГОСТ Р 34.10-2012(512)",
-                "key_type": CKK_GOSTR3410_512,
-                "mechanism": CKM_GOSTR3410_512_KEY_PAIR_GEN,
-                "public_params": GOST_2012_512_PARAMS,
-                "private_hash_params": GOST_3411_2012_512_PARAMS,
-                "required_mechanisms": [CKM_GOSTR3410_512_KEY_PAIR_GEN, CKM_GOSTR3411_12_512],
-            }
-        if raw == "2":
-            return {"name": "RSA-2048", "key_type": CKK_RSA, "mechanism": CKM_RSA_PKCS_KEY_PAIR_GEN}
-        print("Введите 0, 1 или 2")
+    return choose_menu_option(
+        "Какой тип ключевой пары создать?",
+        KEY_PAIR_ALGORITHMS,
+        "Выберите тип [0]: ",
+        "Введите 0, 1 или 2",
+    )
 
 
-def build_gost_key_templates(algorithm, cka_label, pair_id_value):
-    start_date = CK_DATE(b"2020", b"12", b"25")
-    end_date = CK_DATE(b"2030", b"12", b"25")
+def build_key_pair_templates(algorithm, cka_label, pair_id_value):
     public_items = [
         (CKA_CLASS, CKO_PUBLIC_KEY),
         (CKA_LABEL, cka_label),
@@ -814,25 +832,19 @@ def build_gost_key_templates(algorithm, cka_label, pair_id_value):
         (CKA_KEY_TYPE, algorithm["key_type"]),
         (CKA_TOKEN, True),
         (CKA_PRIVATE, False),
-        (CKA_GOSTR3410_PARAMS, algorithm["public_params"]),
-        (CKA_GOSTR3411_PARAMS, algorithm["private_hash_params"]),
+        *algorithm["public_attributes"],
+    ]
+    private_items = [
+        (CKA_CLASS, CKO_PRIVATE_KEY),
+        (CKA_LABEL, cka_label),
+        (CKA_ID, pair_id_value),
+        (CKA_KEY_TYPE, algorithm["key_type"]),
+        (CKA_TOKEN, True),
+        (CKA_PRIVATE, True),
+        *algorithm["private_attributes"],
     ]
     public_template, public_len = attributes_array(public_items)
-    private_template, private_len = attributes_array(
-        [
-            (CKA_CLASS, CKO_PRIVATE_KEY),
-            (CKA_LABEL, cka_label),
-            (CKA_ID, pair_id_value),
-            (CKA_KEY_TYPE, algorithm["key_type"]),
-            (CKA_TOKEN, True),
-            (CKA_PRIVATE, True),
-            (CKA_DERIVE, True),
-            (CKA_GOSTR3410_PARAMS, algorithm["public_params"]),
-            (CKA_GOSTR3411_PARAMS, algorithm["private_hash_params"]),
-            (CKA_START_DATE, (start_date, ctypes.sizeof(start_date))),
-            (CKA_END_DATE, (end_date, ctypes.sizeof(end_date))),
-        ]
-    )
+    private_template, private_len = attributes_array(private_items)
     return public_template, public_len, private_template, private_len
 
 
@@ -843,42 +855,23 @@ def generate_pair(session, funcs, slot_id):
     pair_id_value = bytes.fromhex(cka_id) if is_hex(cka_id) else cka_id.encode("utf-8")
 
     mechanisms = get_mechanism_list(funcs, slot_id)
-    for mechanism_type in algorithm.get("required_mechanisms", [algorithm["mechanism"]]):
+    for mechanism_type in algorithm["required_mechanisms"]:
         if mechanism_type not in mechanisms:
             raise PKCS11Error(f"Токен не поддерживает механизм 0x{mechanism_type:08X} для {algorithm['name']}")
 
-    if algorithm["key_type"] == CKK_RSA:
+    modulus_bits = algorithm.get("modulus_bits")
+    if modulus_bits:
         mechanism_info = get_mechanism_info(funcs, slot_id, CKM_RSA_PKCS_KEY_PAIR_GEN)
-        modulus_bits = RSA_MODULUS_BITS
         if not (int(mechanism_info.ulMinKeySize) <= modulus_bits <= int(mechanism_info.ulMaxKeySize)):
             raise PKCS11Error(
                 f"Токен не поддерживает RSA-{modulus_bits} (доступно {int(mechanism_info.ulMinKeySize)}..{int(mechanism_info.ulMaxKeySize)})"
             )
-        public_template, public_len = attributes_array(
-            [
-                (CKA_CLASS, CKO_PUBLIC_KEY),
-                (CKA_LABEL, cka_label),
-                (CKA_ID, pair_id_value),
-                (CKA_KEY_TYPE, CKK_RSA),
-                (CKA_TOKEN, True),
-                (CKA_ENCRYPT, True),
-                (CKA_PRIVATE, False),
-                (CKA_MODULUS_BITS, modulus_bits),
-            ]
-        )
-        private_template, private_len = attributes_array(
-            [
-                (CKA_CLASS, CKO_PRIVATE_KEY),
-                (CKA_LABEL, cka_label),
-                (CKA_ID, pair_id_value),
-                (CKA_KEY_TYPE, CKK_RSA),
-                (CKA_DECRYPT, True),
-                (CKA_TOKEN, True),
-                (CKA_PRIVATE, True),
-            ]
-        )
-    else:
-        public_template, public_len, private_template, private_len = build_gost_key_templates(algorithm, cka_label, pair_id_value)
+
+    public_template, public_len, private_template, private_len = build_key_pair_templates(
+        algorithm,
+        cka_label,
+        pair_id_value,
+    )
 
     mechanism = CK_MECHANISM(algorithm["mechanism"], None, CK_ULONG(0))
     public_key = CK_OBJECT_HANDLE()
@@ -899,25 +892,11 @@ def generate_pair(session, funcs, slot_id):
 
 def signing_mechanism_for_pair(pair):
     algorithm = pair.get("algorithm")
-    if algorithm == CKK_RSA:
-        return CK_MECHANISM(CKM_SHA256_RSA_PKCS, None, CK_ULONG(0)), None, "SHA-256"
-    if algorithm == CKK_GOSTR3410:
-        mechanism_type = CKM_GOSTR3410_WITH_GOSTR3411_12_256
-        params = GOST_3411_2012_256_PARAMS
-        hash_name = "ГОСТ Р 34.11-2012(256)"
-    if algorithm == CKK_GOSTR3410_512:
-        mechanism_type = CKM_GOSTR3410_WITH_GOSTR3411_12_512
-        params = GOST_3411_2012_512_PARAMS
-        hash_name = "ГОСТ Р 34.11-2012(512)"
-    if algorithm in {CKK_GOSTR3410, CKK_GOSTR3410_512}:
-        param_buffer = ctypes.create_string_buffer(params)
-        mechanism = CK_MECHANISM(
-            mechanism_type,
-            ctypes.cast(param_buffer, CK_VOID_PTR),
-            CK_ULONG(len(params)),
-        )
-        return mechanism, param_buffer, f"{hash_name}, совместный механизм хеширования и подписи"
-    raise PKCS11Error(f"Неподдерживаемый тип ключа для подписи: {pair_algorithm_name(algorithm)}")
+    info = KEY_TYPES.get(algorithm)
+    if not info or "sign_mechanism" not in info:
+        raise PKCS11Error(f"Неподдерживаемый тип ключа для подписи: {pair_algorithm_name(algorithm)}")
+    mechanism, keepalive = mechanism_with_optional_param(info["sign_mechanism"], info.get("sign_params"))
+    return mechanism, keepalive, info["hash_mode"]
 
 
 def generate_secret_key(session, funcs, algorithm, mode_info):
@@ -1039,6 +1018,20 @@ def calculate_benchmark_metrics(data_size, count, operation_times, total_elapsed
     }
 
 
+def print_benchmark_metrics(metrics, warmup_count, warmup_elapsed, setup_elapsed, setup_description):
+    print(f"Прогрев: {warmup_count} операций за {warmup_elapsed:.6f} сек (не входит в измерение)")
+    print(f"Setup: {setup_elapsed:.6f} сек ({setup_description}; не входит в измерение)")
+    print(f"PKCS#11 operation: {metrics['operation_elapsed']:.6f} сек")
+    print(f"Total измеряемого цикла: {metrics['total_elapsed']:.6f} сек")
+    print(f"Среднее время PKCS#11 operation: {metrics['average_operation']:.6f} сек")
+    print(
+        f"Минимум: {metrics['minimum_operation']:.6f} сек | "
+        f"Максимум: {metrics['maximum_operation']:.6f} сек"
+    )
+    print(f"Throughput PKCS#11 operation: {metrics['operation_throughput_mib_s']:.2f} MiB/s")
+    print(f"Throughput total: {metrics['total_throughput_mib_s']:.2f} MiB/s")
+
+
 def decrypt_and_check(session, funcs, key_handle, algorithm, ciphertext, params, expected_plaintext):
     mechanism, mechanism_keepalive = mechanism_with_optional_param(algorithm["encrypt_mechanism"], params)
     rv = funcs["C_DecryptInit"](session, ctypes.byref(mechanism), key_handle)
@@ -1063,6 +1056,9 @@ def decrypt_and_check(session, funcs, key_handle, algorithm, ciphertext, params,
 
 def signature_buffer_length(session, funcs, pair):
     algorithm = pair.get("algorithm")
+    info = KEY_TYPES.get(algorithm)
+    if not info or "signature_size" not in info:
+        raise PKCS11Error(f"Неподдерживаемый тип ключа для подписи: {pair_algorithm_name(algorithm)}")
     if algorithm == CKK_RSA:
         for handle in (pair.get("public"), pair.get("private")):
             if not handle:
@@ -1070,12 +1066,7 @@ def signature_buffer_length(session, funcs, pair):
             modulus_bits = attr_ulong(session, funcs, handle, CKA_MODULUS_BITS)
             if modulus_bits:
                 return int(modulus_bits) // 8
-        return RSA_MODULUS_BITS // 8
-    if algorithm == CKK_GOSTR3410:
-        return 64
-    if algorithm == CKK_GOSTR3410_512:
-        return 128
-    raise PKCS11Error(f"Неподдерживаемый тип ключа для подписи: {pair_algorithm_name(algorithm)}")
+    return info["signature_size"]
 
 
 def verify_signature(session, funcs, pair, data_buffer, data_size, signature_bytes):
@@ -1084,25 +1075,18 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
         raise PKCS11Error("Самопроверка подписи невозможна: у пары нет открытого ключа")
 
     algorithm = pair.get("algorithm")
+    info = KEY_TYPES.get(algorithm)
+    if not info or "verify_mechanism" not in info:
+        raise PKCS11Error(f"Неподдерживаемый тип ключа для проверки подписи: {pair_algorithm_name(algorithm)}")
     verify_data = data_buffer
     verify_data_size = data_size
-    if algorithm == CKK_RSA:
-        verify_mechanism = CK_MECHANISM(CKM_SHA256_RSA_PKCS, None, CK_ULONG(0))
-    elif algorithm in {CKK_GOSTR3410, CKK_GOSTR3410_512}:
-        if algorithm == CKK_GOSTR3410:
-            digest_mechanism_type = CKM_GOSTR3411_12_256
-            verify_mechanism_type = CKM_GOSTR3410
-            digest_size = 32
-        else:
-            digest_mechanism_type = CKM_GOSTR3411_12_512
-            verify_mechanism_type = CKM_GOSTR3410_512
-            digest_size = 64
-
+    digest_mechanism_type = info.get("digest_mechanism")
+    if digest_mechanism_type is not None:
         digest_mechanism = CK_MECHANISM(digest_mechanism_type, None, CK_ULONG(0))
         rv = funcs["C_DigestInit"](session, ctypes.byref(digest_mechanism))
         rv_ok(rv, "C_DigestInit(self-check)")
-        digest = (CK_BYTE * digest_size)()
-        digest_len = CK_ULONG(digest_size)
+        digest = (CK_BYTE * info["digest_size"])()
+        digest_len = CK_ULONG(info["digest_size"])
         rv = funcs["C_Digest"](
             session,
             data_buffer,
@@ -1113,9 +1097,7 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
         rv_ok(rv, "C_Digest(self-check)")
         verify_data = digest
         verify_data_size = int(digest_len.value)
-        verify_mechanism = CK_MECHANISM(verify_mechanism_type, None, CK_ULONG(0))
-    else:
-        raise PKCS11Error(f"Неподдерживаемый тип ключа для проверки подписи: {pair_algorithm_name(algorithm)}")
+    verify_mechanism = CK_MECHANISM(info["verify_mechanism"], None, CK_ULONG(0))
 
     signature = (CK_BYTE * len(signature_bytes)).from_buffer_copy(signature_bytes)
     rv = funcs["C_VerifyInit"](session, ctypes.byref(verify_mechanism), public_key)
@@ -1137,7 +1119,7 @@ def encrypt_file(session, funcs, slot_id):
         print(f"Файл не найден: {file_path}")
         return
 
-    count = prompt_encrypt_count()
+    count = prompt_operation_count("зашифровать")
     warmup_count = prompt_warmup_count()
     mode_info = choose_crypto_mode()
     algorithm = choose_encryption_algorithm()
@@ -1229,17 +1211,13 @@ def encrypt_file(session, funcs, slot_id):
     print(f"Файл: {file_path}")
     print(f"Размер исходных данных: {file_path.stat().st_size} байт")
     print(f"Количество шифрований: {count}")
-    print(f"Прогрев: {warmup_count} операций за {warmup_elapsed:.6f} сек (не входит в измерение)")
-    print(f"Setup: {setup_elapsed:.6f} сек (ключ, параметры механизмов и буферы; не входит в измерение)")
-    print(f"PKCS#11 operation: {metrics['operation_elapsed']:.6f} сек")
-    print(f"Total измеряемого цикла: {metrics['total_elapsed']:.6f} сек")
-    print(f"Среднее время PKCS#11 operation: {metrics['average_operation']:.6f} сек")
-    print(
-        f"Минимум: {metrics['minimum_operation']:.6f} сек | "
-        f"Максимум: {metrics['maximum_operation']:.6f} сек"
+    print_benchmark_metrics(
+        metrics,
+        warmup_count,
+        warmup_elapsed,
+        setup_elapsed,
+        "ключ, параметры механизмов и буферы",
     )
-    print(f"Throughput PKCS#11 operation: {metrics['operation_throughput_mib_s']:.2f} MiB/s")
-    print(f"Throughput total: {metrics['total_throughput_mib_s']:.2f} MiB/s")
     print(f"Размер последнего шифротекста: {len(last_ciphertext)} байт")
     print("Последний шифротекст (Base64, первые 256 символов):")
     print(base64.b64encode(last_ciphertext).decode("ascii")[:256])
@@ -1281,7 +1259,7 @@ def sign_file(session, funcs):
     if not file_path.exists():
         print(f"Файл не найден: {file_path}")
         return
-    count = prompt_count()
+    count = prompt_operation_count("подписать")
     warmup_count = prompt_warmup_count()
     pairs = find_pairs(session, funcs)
     if not pairs:
@@ -1355,17 +1333,7 @@ def sign_file(session, funcs):
     print(f"Количество подписаний: {count}")
     print(f"Размер последней подписи: {last_signature_length} байт")
     print("Самопроверка подписи: успешно")
-    print(f"Прогрев: {warmup_count} операций за {warmup_elapsed:.6f} сек (не входит в измерение)")
-    print(f"Setup: {setup_elapsed:.6f} сек (механизм и буферы; не входит в измерение)")
-    print(f"PKCS#11 operation: {metrics['operation_elapsed']:.6f} сек")
-    print(f"Total измеряемого цикла: {metrics['total_elapsed']:.6f} сек")
-    print(f"Среднее время PKCS#11 operation: {metrics['average_operation']:.6f} сек")
-    print(
-        f"Минимум: {metrics['minimum_operation']:.6f} сек | "
-        f"Максимум: {metrics['maximum_operation']:.6f} сек"
-    )
-    print(f"Throughput PKCS#11 operation: {metrics['operation_throughput_mib_s']:.2f} MiB/s")
-    print(f"Throughput total: {metrics['total_throughput_mib_s']:.2f} MiB/s")
+    print_benchmark_metrics(metrics, warmup_count, warmup_elapsed, setup_elapsed, "механизм и буферы")
     print("Подпись (Base64):")
     for line in textwrap.wrap(signature_base64, 64):
         print(line)
@@ -1384,43 +1352,53 @@ def show_menu():
 
 
 def prepare_functions(library):
-    get_function_list = bind_function(library, "C_GetFunctionList", [ctypes.POINTER(CK_FUNCTION_LIST_PTR)])
-    function_list = CK_FUNCTION_LIST_PTR()
-    rv = get_function_list(ctypes.byref(function_list))
-    rv_ok(rv, "C_GetFunctionList")
-
-    return {
-        "C_Initialize": bind_function(library, "C_Initialize", [CK_VOID_PTR]),
-        "C_Finalize": bind_function(library, "C_Finalize", [CK_VOID_PTR]),
-        "C_GetInfo": bind_function(library, "C_GetInfo", [ctypes.POINTER(CK_INFO)]),
-        "C_GetSlotList": bind_function(library, "C_GetSlotList", [CK_BBOOL, ctypes.POINTER(CK_SLOT_ID), ctypes.POINTER(CK_ULONG)]),
-        "C_GetTokenInfo": bind_function(library, "C_GetTokenInfo", [CK_SLOT_ID, ctypes.POINTER(CK_TOKEN_INFO)]),
-        "C_GetMechanismList": bind_function(library, "C_GetMechanismList", [CK_SLOT_ID, ctypes.POINTER(CK_MECHANISM_TYPE), ctypes.POINTER(CK_ULONG)]),
-        "C_GetMechanismInfo": bind_function(library, "C_GetMechanismInfo", [CK_SLOT_ID, CK_MECHANISM_TYPE, ctypes.POINTER(CK_MECHANISM_INFO)]),
-        "C_OpenSession": bind_function(library, "C_OpenSession", [CK_SLOT_ID, CK_FLAGS, CK_VOID_PTR, CK_VOID_PTR, ctypes.POINTER(CK_SESSION_HANDLE)]),
-        "C_CloseSession": bind_function(library, "C_CloseSession", [CK_SESSION_HANDLE]),
-        "C_Login": bind_function(library, "C_Login", [CK_SESSION_HANDLE, CK_USER_TYPE, ctypes.c_char_p, CK_ULONG]),
-        "C_Logout": bind_function(library, "C_Logout", [CK_SESSION_HANDLE]),
-        "C_FindObjectsInit": bind_function(library, "C_FindObjectsInit", [CK_SESSION_HANDLE, ctypes.POINTER(CK_ATTRIBUTE), CK_ULONG]),
-        "C_FindObjects": bind_function(library, "C_FindObjects", [CK_SESSION_HANDLE, ctypes.POINTER(CK_OBJECT_HANDLE), CK_ULONG, ctypes.POINTER(CK_ULONG)]),
-        "C_FindObjectsFinal": bind_function(library, "C_FindObjectsFinal", [CK_SESSION_HANDLE]),
-        "C_GetAttributeValue": bind_function(library, "C_GetAttributeValue", [CK_SESSION_HANDLE, CK_OBJECT_HANDLE, ctypes.POINTER(CK_ATTRIBUTE), CK_ULONG]),
-        "C_CreateObject": bind_function(library, "C_CreateObject", [CK_SESSION_HANDLE, ctypes.POINTER(CK_ATTRIBUTE), CK_ULONG, ctypes.POINTER(CK_OBJECT_HANDLE)]),
-        "C_GenerateKeyPair": bind_function(library, "C_GenerateKeyPair", [CK_SESSION_HANDLE, ctypes.POINTER(CK_MECHANISM), ctypes.POINTER(CK_ATTRIBUTE), CK_ULONG, ctypes.POINTER(CK_ATTRIBUTE), CK_ULONG, ctypes.POINTER(CK_OBJECT_HANDLE), ctypes.POINTER(CK_OBJECT_HANDLE)]),
-        "C_GenerateKey": bind_function(library, "C_GenerateKey", [CK_SESSION_HANDLE, ctypes.POINTER(CK_MECHANISM), ctypes.POINTER(CK_ATTRIBUTE), CK_ULONG, ctypes.POINTER(CK_OBJECT_HANDLE)]),
-        "C_GenerateRandom": bind_function(library, "C_GenerateRandom", [CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG]),
-        "C_DestroyObject": bind_function(library, "C_DestroyObject", [CK_SESSION_HANDLE, CK_OBJECT_HANDLE]),
-        "C_SignInit": bind_function(library, "C_SignInit", [CK_SESSION_HANDLE, ctypes.POINTER(CK_MECHANISM), CK_OBJECT_HANDLE]),
-        "C_Sign": bind_function(library, "C_Sign", [CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, ctypes.POINTER(CK_ULONG)]),
-        "C_VerifyInit": bind_function(library, "C_VerifyInit", [CK_SESSION_HANDLE, ctypes.POINTER(CK_MECHANISM), CK_OBJECT_HANDLE]),
-        "C_Verify": bind_function(library, "C_Verify", [CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG]),
-        "C_DigestInit": bind_function(library, "C_DigestInit", [CK_SESSION_HANDLE, ctypes.POINTER(CK_MECHANISM)]),
-        "C_Digest": bind_function(library, "C_Digest", [CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, ctypes.POINTER(CK_ULONG)]),
-        "C_EncryptInit": bind_function(library, "C_EncryptInit", [CK_SESSION_HANDLE, ctypes.POINTER(CK_MECHANISM), CK_OBJECT_HANDLE]),
-        "C_Encrypt": bind_function(library, "C_Encrypt", [CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, ctypes.POINTER(CK_ULONG)]),
-        "C_DecryptInit": bind_function(library, "C_DecryptInit", [CK_SESSION_HANDLE, ctypes.POINTER(CK_MECHANISM), CK_OBJECT_HANDLE]),
-        "C_Decrypt": bind_function(library, "C_Decrypt", [CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, ctypes.POINTER(CK_ULONG)]),
+    signatures = {
+        "C_Initialize": [CK_VOID_PTR],
+        "C_Finalize": [CK_VOID_PTR],
+        "C_GetInfo": [ctypes.POINTER(CK_INFO)],
+        "C_GetSlotList": [CK_BBOOL, ctypes.POINTER(CK_SLOT_ID), ctypes.POINTER(CK_ULONG)],
+        "C_GetTokenInfo": [CK_SLOT_ID, ctypes.POINTER(CK_TOKEN_INFO)],
+        "C_GetMechanismList": [CK_SLOT_ID, ctypes.POINTER(CK_MECHANISM_TYPE), ctypes.POINTER(CK_ULONG)],
+        "C_GetMechanismInfo": [CK_SLOT_ID, CK_MECHANISM_TYPE, ctypes.POINTER(CK_MECHANISM_INFO)],
+        "C_OpenSession": [CK_SLOT_ID, CK_FLAGS, CK_VOID_PTR, CK_VOID_PTR, ctypes.POINTER(CK_SESSION_HANDLE)],
+        "C_CloseSession": [CK_SESSION_HANDLE],
+        "C_Login": [CK_SESSION_HANDLE, CK_USER_TYPE, ctypes.c_char_p, CK_ULONG],
+        "C_Logout": [CK_SESSION_HANDLE],
+        "C_FindObjectsInit": [CK_SESSION_HANDLE, ctypes.POINTER(CK_ATTRIBUTE), CK_ULONG],
+        "C_FindObjects": [CK_SESSION_HANDLE, ctypes.POINTER(CK_OBJECT_HANDLE), CK_ULONG, ctypes.POINTER(CK_ULONG)],
+        "C_FindObjectsFinal": [CK_SESSION_HANDLE],
+        "C_GetAttributeValue": [CK_SESSION_HANDLE, CK_OBJECT_HANDLE, ctypes.POINTER(CK_ATTRIBUTE), CK_ULONG],
+        "C_GenerateKeyPair": [
+            CK_SESSION_HANDLE,
+            ctypes.POINTER(CK_MECHANISM),
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_OBJECT_HANDLE),
+            ctypes.POINTER(CK_OBJECT_HANDLE),
+        ],
+        "C_GenerateKey": [
+            CK_SESSION_HANDLE,
+            ctypes.POINTER(CK_MECHANISM),
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_OBJECT_HANDLE),
+        ],
+        "C_GenerateRandom": [CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG],
+        "C_DestroyObject": [CK_SESSION_HANDLE, CK_OBJECT_HANDLE],
+        "C_SignInit": [CK_SESSION_HANDLE, ctypes.POINTER(CK_MECHANISM), CK_OBJECT_HANDLE],
+        "C_Sign": [CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, ctypes.POINTER(CK_ULONG)],
+        "C_VerifyInit": [CK_SESSION_HANDLE, ctypes.POINTER(CK_MECHANISM), CK_OBJECT_HANDLE],
+        "C_Verify": [CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG],
+        "C_DigestInit": [CK_SESSION_HANDLE, ctypes.POINTER(CK_MECHANISM)],
+        "C_Digest": [CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, ctypes.POINTER(CK_ULONG)],
+        "C_EncryptInit": [CK_SESSION_HANDLE, ctypes.POINTER(CK_MECHANISM), CK_OBJECT_HANDLE],
+        "C_Encrypt": [CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, ctypes.POINTER(CK_ULONG)],
+        "C_DecryptInit": [CK_SESSION_HANDLE, ctypes.POINTER(CK_MECHANISM), CK_OBJECT_HANDLE],
+        "C_Decrypt": [CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, ctypes.POINTER(CK_ULONG)],
     }
+    return {name: bind_function(library, name, argtypes) for name, argtypes in signatures.items()}
 
 
 def get_token_slots(funcs):
