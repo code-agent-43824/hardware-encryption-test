@@ -1,5 +1,7 @@
 import ctypes
+import io
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import app
@@ -64,6 +66,102 @@ class BenchmarkMetricTests(unittest.TestCase):
             self.assertEqual(app.prompt_warmup_count(), app.DEFAULT_WARMUP_COUNT)
         with mock.patch("builtins.input", return_value="0"):
             self.assertEqual(app.prompt_warmup_count(), 0)
+
+
+class ReliabilityTests(unittest.TestCase):
+    def test_macos_default_library_uses_installed_system_path(self):
+        with mock.patch.object(app.platform, "system", return_value="Darwin"):
+            self.assertEqual(app.default_library_path(), Path("/usr/local/lib/librtpkcs11ecp.dylib"))
+            self.assertEqual(app.resolve_library_path(""), Path("/usr/local/lib/librtpkcs11ecp.dylib"))
+
+    def test_key_type_is_printed_as_pkcs11_constant(self):
+        pair = {
+            "id": "rsa",
+            "label": "rsa",
+            "algorithm": app.CKK_RSA,
+            "duplicate_count": 1,
+        }
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output):
+            app.print_pair("0", pair)
+        self.assertIn("algorithm=CKK_RSA (RSA-2048)", output.getvalue())
+        self.assertNotIn("algorithm=0x00000000", output.getvalue())
+
+    def test_pairing_uses_raw_id_and_keeps_duplicates(self):
+        records = [
+            {"kind": "public", "handle": app.CK_OBJECT_HANDLE(1), "id_raw": b"same", "label": "A", "algorithm": app.CKK_RSA},
+            {"kind": "private", "handle": 2, "id_raw": b"same", "label": "A", "algorithm": app.CKK_RSA},
+            {"kind": "public", "handle": 3, "id_raw": b"same", "label": "B", "algorithm": app.CKK_RSA},
+            {"kind": "private", "handle": 4, "id_raw": b"same", "label": "B", "algorithm": app.CKK_RSA},
+            # These IDs render alike after whitespace trimming, but are not the same bytes.
+            {"kind": "public", "handle": 5, "id_raw": b"shown", "label": "C", "algorithm": app.CKK_GOSTR3410},
+            {"kind": "private", "handle": 6, "id_raw": b" shown ", "label": "C", "algorithm": app.CKK_GOSTR3410},
+        ]
+        pairs = app.pair_key_records(records)
+        rsa_pairs = [pair for pair in pairs if pair["algorithm"] == app.CKK_RSA]
+        gost_pairs = [pair for pair in pairs if pair["algorithm"] == app.CKK_GOSTR3410]
+        self.assertEqual(
+            [(app.native_int(pair["public"]), app.native_int(pair["private"])) for pair in rsa_pairs],
+            [(1, 2), (3, 4)],
+        )
+        self.assertEqual([pair["duplicate_count"] for pair in rsa_pairs], [2, 2])
+        self.assertEqual(len(gost_pairs), 2)
+        self.assertTrue(all(not (pair["public"] and pair["private"]) for pair in gost_pairs))
+
+    def test_cleanup_error_does_not_hide_action_error(self):
+        funcs = {}
+        original_error = app.PKCS11Error("исходная ошибка", 0x55)
+        with (
+            mock.patch.object(app, "open_session", return_value=7),
+            mock.patch.object(app, "login", return_value=True),
+            mock.patch.object(app, "logout", side_effect=app.PKCS11Error("ошибка logout", 0x66)),
+            mock.patch.object(app, "close_session", side_effect=app.PKCS11Error("ошибка close", 0x77)),
+            mock.patch("sys.stderr", io.StringIO()) as stderr,
+        ):
+            with self.assertRaises(app.PKCS11Error) as caught:
+                app.run_with_session(
+                    funcs,
+                    1,
+                    lambda _session, _funcs: (_ for _ in ()).throw(original_error),
+                    login_required=True,
+                )
+        self.assertIs(caught.exception, original_error)
+        self.assertIn("ошибка logout", stderr.getvalue())
+        self.assertIn("ошибка close", stderr.getvalue())
+
+    def test_initialize_ownership_is_explicit(self):
+        self.assertTrue(app.initialize_pkcs11({"C_Initialize": mock.Mock(return_value=app.CKR_OK)}))
+        self.assertFalse(
+            app.initialize_pkcs11(
+                {"C_Initialize": mock.Mock(return_value=app.CKR_CRYPTOKI_ALREADY_INITIALIZED)}
+            )
+        )
+
+    def test_blank_pin_is_not_replaced_with_demo_pin(self):
+        login_call = mock.Mock(return_value=app.CKR_OK)
+        with mock.patch.object(app.getpass, "getpass", return_value=""):
+            with self.assertRaisesRegex(app.PKCS11Error, "автоматическая подстановка"):
+                app.login({"C_Login": login_call}, 1)
+        login_call.assert_not_called()
+
+    def test_stale_application_temp_keys_are_removed(self):
+        destroy = mock.Mock(return_value=app.CKR_OK)
+        funcs = {"C_DestroyObject": destroy}
+        with (
+            mock.patch.object(app, "find_objects", return_value=[11, 12, 13]),
+            mock.patch.object(
+                app,
+                "attr_text",
+                side_effect=[
+                    f"{app.TEMP_KEY_LABEL_PREFIX}old-a",
+                    "user-secret-key",
+                    f"{app.TEMP_KEY_LABEL_PREFIX}old-b",
+                ],
+            ),
+            mock.patch("sys.stdout", io.StringIO()),
+        ):
+            self.assertEqual(app.cleanup_stale_temp_keys(1, funcs), 2)
+        self.assertEqual([call.args[1] for call in destroy.call_args_list], [11, 13])
 
 
 if __name__ == "__main__":

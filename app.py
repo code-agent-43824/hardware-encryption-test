@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 
-APP_VERSION = "v2.6"
+APP_VERSION = "v2.7"
 CK_RV = ctypes.c_ulong
 CK_VOID_PTR = ctypes.c_void_p
 CK_ULONG = ctypes.c_ulong
@@ -90,9 +90,10 @@ CKR_SESSION_HANDLE_INVALID = 0x000000B3
 CKR_USER_ALREADY_LOGGED_IN = 0x00000100
 CKR_USER_NOT_LOGGED_IN = 0x00000101
 
-DEFAULT_PIN = "12345678"
 DEFAULT_WARMUP_COUNT = 3
 MAX_WARMUP_COUNT = 1000
+MACOS_DEFAULT_LIBRARY_PATH = Path("/usr/local/lib/librtpkcs11ecp.dylib")
+TEMP_KEY_LABEL_PREFIX = "hardware-encryption-test-temp-v1-"
 RSA_MODULUS_BITS = 2048
 FIND_OBJECTS_LIMIT = 128
 FIND_OBJECTS_BATCH = 16
@@ -225,6 +226,10 @@ def yes_no(value):
     return CK_BBOOL(1 if value else 0)
 
 
+def native_int(value):
+    return int(value.value) if hasattr(value, "value") else int(value)
+
+
 def rv_ok(rv, action):
     if rv != CKR_OK:
         raise PKCS11Error(action, rv)
@@ -251,10 +256,16 @@ def default_library_name():
     return "librtpkcs11ecp.so"
 
 
+def default_library_path():
+    if platform.system() == "Darwin":
+        return MACOS_DEFAULT_LIBRARY_PATH
+    return app_dir() / default_library_name()
+
+
 def resolve_library_path(raw_path):
     if raw_path:
         return Path(raw_path).expanduser()
-    return app_dir() / default_library_name()
+    return default_library_path()
 
 
 def resolve_sample_file_path(raw_path):
@@ -378,6 +389,8 @@ def attr_ulong(session, funcs, obj_handle, attr_type):
 
 
 def display_id(value):
+    if value is None:
+        return "недоступен"
     if not value:
         return ""
     try:
@@ -391,6 +404,22 @@ def display_id(value):
 
 def attr_id(session, funcs, obj_handle):
     return display_id(attr_bytes(session, funcs, obj_handle, CKA_ID))
+
+
+KEY_TYPE_CONSTANTS = {
+    CKK_RSA: "CKK_RSA",
+    CKK_GOSTR3410: "CKK_GOSTR3410",
+    CKK_GOSTR3410_512: "CKK_GOSTR3410_512",
+    CKK_GOST28147: "CKK_GOST28147",
+    CKK_KUZNECHIK: "CKK_KUZNECHIK",
+    CKK_MAGMA: "CKK_MAGMA",
+}
+
+
+def key_type_constant_name(algorithm):
+    if algorithm is None:
+        return "CKK_UNKNOWN"
+    return KEY_TYPE_CONSTANTS.get(algorithm, f"CKK_UNKNOWN(0x{algorithm:08X})")
 
 
 def prompt_non_empty(label):
@@ -527,10 +556,13 @@ def build_ctr_acpkm_params(iv_size, period=0, iv=None):
 
 def print_pair(prefix, pair):
     algorithm = pair.get("algorithm")
-    if algorithm is None:
-        print(f"{prefix}: cka_id={pair['id']} | cka_label={pair['label']}")
-        return
-    print(f"{prefix}: cka_id={pair['id']} | cka_label={pair['label']} | algorithm=0x{algorithm:08X}")
+    duplicate = ""
+    if pair.get("duplicate_count", 1) > 1:
+        duplicate = f" | duplicate={pair['duplicate_index']}/{pair['duplicate_count']}"
+    print(
+        f"{prefix}: cka_id={pair['id']} | cka_label={pair['label']} | "
+        f"algorithm={key_type_constant_name(algorithm)} ({pair_algorithm_name(algorithm)}){duplicate}"
+    )
 
 
 def pair_algorithm_name(algorithm):
@@ -561,8 +593,85 @@ def find_objects(session, funcs, template_items, limit=32):
             objects.extend(batch[:count])
         return objects
     finally:
+        operation_failed = sys.exc_info()[0] is not None
         rv = funcs["C_FindObjectsFinal"](session)
-        rv_ok(rv, "C_FindObjectsFinal")
+        if rv != CKR_OK:
+            cleanup_error = PKCS11Error("C_FindObjectsFinal", rv)
+            if operation_failed:
+                print(f"Предупреждение при очистке после исходной ошибки: {cleanup_error}", file=sys.stderr)
+            else:
+                raise cleanup_error
+
+
+def pair_key_records(records):
+    """Pair key objects by the original CKA_ID bytes and CKA_KEY_TYPE.
+
+    Duplicate IDs are retained as separate selectable rows instead of silently
+    overwriting an earlier object handle.
+    """
+    groups = {}
+    for record in records:
+        group_key = (record["id_raw"], record["algorithm"])
+        groups.setdefault(group_key, {"public": [], "private": []})[record["kind"]].append(record)
+
+    result = []
+    sorted_groups = sorted(
+        groups.items(),
+        key=lambda item: (
+            b"" if item[0][0] is None else item[0][0],
+            -1 if item[0][1] is None else item[0][1],
+            item[0][0] is None,
+        ),
+    )
+    for (raw_id, algorithm), sides in sorted_groups:
+        public = sorted(sides["public"], key=lambda item: (item["label"], native_int(item["handle"])))
+        private = sorted(sides["private"], key=lambda item: (item["label"], native_int(item["handle"])))
+        paired = []
+
+        # Labels are only a tie-breaker inside an already matched raw CKA_ID.
+        # This keeps similarly named duplicates together without ever using the
+        # display string as key identity.
+        remaining_private = list(private)
+        remaining_public = []
+        for public_record in public:
+            match_index = next(
+                (
+                    index
+                    for index, private_record in enumerate(remaining_private)
+                    if public_record["label"] and public_record["label"] == private_record["label"]
+                ),
+                None,
+            )
+            if match_index is None:
+                remaining_public.append(public_record)
+            else:
+                paired.append((public_record, remaining_private.pop(match_index)))
+
+        while remaining_public or remaining_private:
+            paired.append(
+                (
+                    remaining_public.pop(0) if remaining_public else None,
+                    remaining_private.pop(0) if remaining_private else None,
+                )
+            )
+
+        duplicate_count = len(paired)
+        for duplicate_index, (public_record, private_record) in enumerate(paired, start=1):
+            labels = [record["label"] for record in (public_record, private_record) if record and record["label"]]
+            label = "" if not labels else labels[0] if len(set(labels)) == 1 else " / ".join(labels)
+            result.append(
+                {
+                    "id_raw": raw_id,
+                    "id": display_id(raw_id),
+                    "label": label,
+                    "algorithm": algorithm,
+                    "public": public_record["handle"] if public_record else None,
+                    "private": private_record["handle"] if private_record else None,
+                    "duplicate_index": duplicate_index,
+                    "duplicate_count": duplicate_count,
+                }
+            )
+    return result
 
 
 def find_pairs(session, funcs, cka_id=None, cka_label=None):
@@ -575,22 +684,19 @@ def find_pairs(session, funcs, cka_id=None, cka_label=None):
     public_objects = find_objects(session, funcs, [(CKA_CLASS, CKO_PUBLIC_KEY), *common], limit=FIND_OBJECTS_LIMIT)
     private_objects = find_objects(session, funcs, [(CKA_CLASS, CKO_PRIVATE_KEY), *common], limit=FIND_OBJECTS_LIMIT)
 
-    pairs = {}
+    records = []
     for key_name, handles in (("public", public_objects), ("private", private_objects)):
         for handle in handles:
-            pair_id = attr_id(session, funcs, handle)
-            algorithm = attr_ulong(session, funcs, handle, CKA_KEY_TYPE)
-            pair_key = (pair_id, algorithm)
-            pair = pairs.setdefault(
-                pair_key,
-                {"id": pair_id, "label": "", "algorithm": algorithm, "public": None, "private": None},
+            records.append(
+                {
+                    "kind": key_name,
+                    "handle": handle,
+                    "id_raw": attr_bytes(session, funcs, handle, CKA_ID),
+                    "label": attr_text(session, funcs, handle, CKA_LABEL),
+                    "algorithm": attr_ulong(session, funcs, handle, CKA_KEY_TYPE),
+                }
             )
-            pair_label = attr_text(session, funcs, handle, CKA_LABEL)
-            if pair_label and not pair["label"]:
-                pair["label"] = pair_label
-            pair[key_name] = handle
-
-    return [pairs[key] for key in sorted(pairs, key=lambda item: (item[0], -1 if item[1] is None else item[1]))]
+    return pair_key_records(records)
 
 
 def is_hex(value):
@@ -619,17 +725,15 @@ def close_session(funcs, session):
 
 def login(funcs, session):
     pin = getpass.getpass("PIN токена: ")
-    used_default_pin = False
     if pin == "":
-        pin = DEFAULT_PIN
-        used_default_pin = True
+        raise PKCS11Error("PIN не введён; автоматическая подстановка демонстрационного PIN отключена")
     pin_bytes = pin.encode("utf-8")
     rv = funcs["C_Login"](session, CK_USER_TYPE(CKU_USER), pin_bytes, CK_ULONG(len(pin_bytes)))
-    if rv in (CKR_OK, CKR_USER_ALREADY_LOGGED_IN):
-        return
+    if rv == CKR_OK:
+        return True
+    if rv == CKR_USER_ALREADY_LOGGED_IN:
+        return False
     if rv == CKR_PIN_INCORRECT:
-        if used_default_pin:
-            raise PKCS11Error(f"PIN не передан, автоматическая проверка {DEFAULT_PIN} не подошла. Введите правильный PIN", rv)
         raise PKCS11Error("Неверный PIN", rv)
     raise PKCS11Error("C_Login", rv)
 
@@ -811,7 +915,7 @@ def signing_mechanism_for_pair(pair):
 def generate_secret_key(session, funcs, algorithm, mode_info):
     template_items = [
         (CKA_CLASS, CKO_SECRET_KEY),
-        (CKA_LABEL, make_random_label("enc-key")),
+        (CKA_LABEL, f"{TEMP_KEY_LABEL_PREFIX}{secrets.token_hex(8)}"),
         (CKA_ID, random_bytes(session, funcs, 16)),
         (CKA_KEY_TYPE, algorithm["key_type"]),
         (CKA_TOKEN, mode_info["cka_token"]),
@@ -828,6 +932,26 @@ def generate_secret_key(session, funcs, algorithm, mode_info):
     rv = funcs["C_GenerateKey"](session, ctypes.byref(mechanism), template, CK_ULONG(template_len), ctypes.byref(key_handle))
     rv_ok(rv, f"C_GenerateKey({algorithm['name']})")
     return key_handle
+
+
+def cleanup_stale_temp_keys(session, funcs):
+    handles = find_objects(
+        session,
+        funcs,
+        [(CKA_CLASS, CKO_SECRET_KEY), (CKA_TOKEN, True)],
+        limit=FIND_OBJECTS_LIMIT,
+    )
+    stale = [
+        handle
+        for handle in handles
+        if attr_text(session, funcs, handle, CKA_LABEL).startswith(TEMP_KEY_LABEL_PREFIX)
+    ]
+    for handle in stale:
+        rv = funcs["C_DestroyObject"](session, handle)
+        rv_ok(rv, "C_DestroyObject(stale temporary encryption key)")
+    if stale:
+        print(f"Удалены временные ключи после предыдущего аварийного запуска: {len(stale)}")
+    return len(stale)
 
 
 def build_encryption_params(algorithm):
@@ -1010,6 +1134,9 @@ def encrypt_file(session, funcs, slot_id):
     mode_info = choose_crypto_mode()
     algorithm = choose_encryption_algorithm()
 
+    if mode_info["cka_token"]:
+        cleanup_stale_temp_keys(session, funcs)
+
     mechanisms = get_mechanism_list(funcs, slot_id)
     required = [algorithm["key_gen_mechanism"], algorithm["encrypt_mechanism"]]
     for mechanism_type in required:
@@ -1073,7 +1200,12 @@ def encrypt_file(session, funcs, slot_id):
     finally:
         if key_handle:
             rv = funcs["C_DestroyObject"](session, key_handle)
-            rv_ok(rv, "C_DestroyObject(secret encryption key)")
+            if rv != CKR_OK:
+                cleanup_error = PKCS11Error("C_DestroyObject(secret encryption key)", rv)
+                if sys.exc_info()[0] is not None:
+                    print(f"Предупреждение при очистке после исходной ошибки: {cleanup_error}", file=sys.stderr)
+                else:
+                    raise cleanup_error
 
     metrics = calculate_benchmark_metrics(len(plaintext), count, operation_times, total_elapsed)
     print(f"Режим шифрования: {mode_info['name']}")
@@ -1283,7 +1415,7 @@ def prepare_functions(library):
     }
 
 
-def get_first_token_slot(funcs):
+def get_token_slots(funcs):
     count = CK_ULONG(0)
     rv = funcs["C_GetSlotList"](CK_BBOOL(1), None, ctypes.byref(count))
     rv_ok(rv, "C_GetSlotList(count)")
@@ -1292,7 +1424,38 @@ def get_first_token_slot(funcs):
     slots = (CK_SLOT_ID * count.value)()
     rv = funcs["C_GetSlotList"](CK_BBOOL(1), slots, ctypes.byref(count))
     rv_ok(rv, "C_GetSlotList(data)")
-    return slots[0]
+    return [native_int(slots[index]) for index in range(int(count.value))]
+
+
+def get_token_info(funcs, slot_id):
+    token_info = CK_TOKEN_INFO()
+    rv = funcs["C_GetTokenInfo"](slot_id, ctypes.byref(token_info))
+    rv_ok(rv, "C_GetTokenInfo")
+    return token_info
+
+
+def choose_token_slot(funcs, slots):
+    if len(slots) == 1:
+        return slots[0]
+    print("Найдено несколько токенов:")
+    for index, slot_id in enumerate(slots):
+        token_info = get_token_info(funcs, slot_id)
+        print(
+            f"{index}) slot={int(slot_id)} | label={clean_text(token_info.label)} | "
+            f"model={clean_text(token_info.model)} | serial={clean_text(token_info.serialNumber)}"
+        )
+    while True:
+        raw = input("Выберите номер токена [0]: ").strip()
+        if raw == "":
+            return slots[0]
+        try:
+            index = int(raw)
+        except ValueError:
+            print("Введите номер")
+            continue
+        if 0 <= index < len(slots):
+            return slots[index]
+        print("Нет такого номера")
 
 
 def print_library_info(funcs):
@@ -1307,9 +1470,7 @@ def print_library_info(funcs):
 
 
 def print_token_info(funcs, slot_id):
-    token_info = CK_TOKEN_INFO()
-    rv = funcs["C_GetTokenInfo"](slot_id, ctypes.byref(token_info))
-    rv_ok(rv, "C_GetTokenInfo")
+    token_info = get_token_info(funcs, slot_id)
     print(f"Token slot: {int(slot_id)}")
     print(f"Token label: {clean_text(token_info.label)}")
     print(f"Token manufacturer: {clean_text(token_info.manufacturerID)}")
@@ -1338,16 +1499,31 @@ def get_mechanism_info(funcs, slot_id, mechanism_type):
 
 def run_with_session(funcs, slot_id, action, *, rw=False, login_required=False):
     session = open_session(funcs, slot_id, rw=rw)
+    login_owned = False
     try:
         if login_required:
-            login(funcs, session)
-        try:
-            action(session, funcs)
-        finally:
-            if login_required:
-                logout(funcs, session)
+            login_owned = login(funcs, session)
+        action(session, funcs)
     finally:
-        close_session(funcs, session)
+        operation_failed = sys.exc_info()[0] is not None
+        cleanup_errors = []
+        if login_owned:
+            try:
+                logout(funcs, session)
+            except PKCS11Error as error:
+                cleanup_errors.append(error)
+        try:
+            close_session(funcs, session)
+        except PKCS11Error as error:
+            cleanup_errors.append(error)
+        if cleanup_errors:
+            if operation_failed:
+                for error in cleanup_errors:
+                    print(f"Предупреждение при очистке после исходной ошибки: {error}", file=sys.stderr)
+            else:
+                for error in cleanup_errors[1:]:
+                    print(f"Дополнительная ошибка очистки: {error}", file=sys.stderr)
+                raise cleanup_errors[0]
 
 
 def run_menu(funcs, slot_id):
@@ -1375,33 +1551,62 @@ def run_menu(funcs, slot_id):
             print(f"Неожиданная ошибка: {error}")
 
 
+def library_load_error_message(library_path, error):
+    message = f"Не удалось загрузить PKCS#11-библиотеку {library_path}: {error}"
+    if platform.system() == "Darwin":
+        message += (
+            "\nУстановите официальный RutokenInstaller.pkg и используйте установленную "
+            f"библиотеку по пути {MACOS_DEFAULT_LIBRARY_PATH}; не извлекайте и не переименовывайте dylib вручную."
+        )
+    return message
+
+
+def initialize_pkcs11(funcs):
+    rv = funcs["C_Initialize"](None)
+    if rv == CKR_OK:
+        return True
+    if rv == CKR_CRYPTOKI_ALREADY_INITIALIZED:
+        return False
+    rv_ok(rv, "C_Initialize")
+
+
 def main():
     print(f"hardware-encryption-test {APP_VERSION}")
-    raw_library_path = input("Путь к PKCS#11 библиотеке [Enter для файла рядом с приложением]: ").strip().strip('"')
+    default_path = default_library_path()
+    raw_library_path = input(f"Путь к PKCS#11 библиотеке [Enter: {default_path}]: ").strip().strip('"')
     library_path = resolve_library_path(raw_library_path)
     if not library_path.exists():
         print(f"Библиотека не найдена: {library_path}")
-        sys.exit(1)
+        return 1
 
-    library = load_library(str(library_path))
+    try:
+        library = load_library(str(library_path))
+    except OSError as error:
+        print(library_load_error_message(library_path, error))
+        return 1
+
     funcs = None
+    initialized_here = False
     try:
         funcs = prepare_functions(library)
-        rv = funcs["C_Initialize"](None)
-        if rv not in (CKR_OK, CKR_CRYPTOKI_ALREADY_INITIALIZED):
-            rv_ok(rv, "C_Initialize")
+        initialized_here = initialize_pkcs11(funcs)
         print_library_info(funcs)
-        slot_id = get_first_token_slot(funcs)
+        slot_id = choose_token_slot(funcs, get_token_slots(funcs))
         print_token_info(funcs, slot_id)
         run_menu(funcs, slot_id)
+    except (AttributeError, OSError) as error:
+        print(library_load_error_message(library_path, error))
+        return 1
     except PKCS11Error as error:
-        print(f"Error: {error}")
+        print(f"Ошибка: {error}")
+        return 1
     finally:
-        if funcs is not None:
+        if initialized_here:
             rv = funcs["C_Finalize"](None)
             if rv != CKR_OK:
                 print(f"C_Finalize failed: 0x{rv:08X}", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
