@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 
-APP_VERSION = "v2.5"
+APP_VERSION = "v2.6"
 CK_RV = ctypes.c_ulong
 CK_VOID_PTR = ctypes.c_void_p
 CK_ULONG = ctypes.c_ulong
@@ -91,6 +91,8 @@ CKR_USER_ALREADY_LOGGED_IN = 0x00000100
 CKR_USER_NOT_LOGGED_IN = 0x00000101
 
 DEFAULT_PIN = "12345678"
+DEFAULT_WARMUP_COUNT = 3
+MAX_WARMUP_COUNT = 1000
 RSA_MODULUS_BITS = 2048
 FIND_OBJECTS_LIMIT = 128
 FIND_OBJECTS_BATCH = 16
@@ -423,6 +425,21 @@ def prompt_encrypt_count():
         if 1 <= count <= 10000:
             return count
         print("Допустим диапазон от 1 до 10000")
+
+
+def prompt_warmup_count():
+    while True:
+        raw = input(f"Сколько операций прогрева? [по умолчанию {DEFAULT_WARMUP_COUNT}, 0-{MAX_WARMUP_COUNT}]: ").strip()
+        if raw == "":
+            return DEFAULT_WARMUP_COUNT
+        try:
+            count = int(raw)
+        except ValueError:
+            print("Введите целое число")
+            continue
+        if 0 <= count <= MAX_WARMUP_COUNT:
+            return count
+        print(f"Допустим диапазон от 0 до {MAX_WARMUP_COUNT}")
 
 
 def choose_crypto_mode():
@@ -824,21 +841,70 @@ def build_encryption_params(algorithm):
     return secrets.token_bytes(iv_size) if iv_size else b""
 
 
-def encrypt_with_generated_key(session, funcs, key_handle, algorithm, data_buffer, data_size, encrypted, params):
+def prepare_encryption_operation(algorithm, params, output_capacity):
     mechanism, mechanism_keepalive = mechanism_with_optional_param(algorithm["encrypt_mechanism"], params)
-    rv = funcs["C_EncryptInit"](session, ctypes.byref(mechanism), key_handle)
+    return {
+        "params": params,
+        "mechanism": mechanism,
+        "mechanism_keepalive": mechanism_keepalive,
+        "output_length": CK_ULONG(output_capacity),
+    }
+
+
+def encrypt_with_generated_key(
+    session,
+    funcs,
+    key_handle,
+    algorithm,
+    data_pointer,
+    data_size,
+    encrypted_pointer,
+    prepared_operation,
+):
+    started = time.perf_counter()
+    rv = funcs["C_EncryptInit"](session, ctypes.byref(prepared_operation["mechanism"]), key_handle)
     rv_ok(rv, f"C_EncryptInit({algorithm['name']})")
 
-    out_len = CK_ULONG(data_size)
     rv = funcs["C_Encrypt"](
         session,
-        data_buffer,
-        CK_ULONG(data_size),
-        ctypes.cast(encrypted, CK_BYTE_PTR),
-        ctypes.byref(out_len),
+        data_pointer,
+        data_size,
+        encrypted_pointer,
+        ctypes.byref(prepared_operation["output_length"]),
     )
     rv_ok(rv, f"C_Encrypt(data, {algorithm['name']})")
-    return int(out_len.value), mechanism_keepalive
+    elapsed = time.perf_counter() - started
+    return int(prepared_operation["output_length"].value), elapsed
+
+
+def sign_once(session, funcs, private_key, mechanism, data_pointer, data_size, signature_pointer, output_length):
+    started = time.perf_counter()
+    rv = funcs["C_SignInit"](session, ctypes.byref(mechanism), private_key)
+    rv_ok(rv, "C_SignInit")
+
+    rv = funcs["C_Sign"](
+        session,
+        data_pointer,
+        data_size,
+        signature_pointer,
+        ctypes.byref(output_length),
+    )
+    rv_ok(rv, "C_Sign(data)")
+    return time.perf_counter() - started
+
+
+def calculate_benchmark_metrics(data_size, count, operation_times, total_elapsed):
+    operation_elapsed = sum(operation_times)
+    processed_mib = (data_size * count) / (1024 * 1024)
+    return {
+        "operation_elapsed": operation_elapsed,
+        "total_elapsed": total_elapsed,
+        "average_operation": operation_elapsed / count,
+        "minimum_operation": min(operation_times),
+        "maximum_operation": max(operation_times),
+        "operation_throughput_mib_s": processed_mib / operation_elapsed if operation_elapsed else 0.0,
+        "total_throughput_mib_s": processed_mib / total_elapsed if total_elapsed else 0.0,
+    }
 
 
 def decrypt_and_check(session, funcs, key_handle, algorithm, ciphertext, params, expected_plaintext):
@@ -940,6 +1006,7 @@ def encrypt_file(session, funcs, slot_id):
         return
 
     count = prompt_encrypt_count()
+    warmup_count = prompt_warmup_count()
     mode_info = choose_crypto_mode()
     algorithm = choose_encryption_algorithm()
 
@@ -950,36 +1017,56 @@ def encrypt_file(session, funcs, slot_id):
             raise PKCS11Error(f"Токен не поддерживает механизм 0x{mechanism_type:08X} для {algorithm['name']}")
 
     plaintext = file_path.read_bytes()
-    data_buffer = (CK_BYTE * len(plaintext)).from_buffer_copy(plaintext)
-    encrypted_buffer = (CK_BYTE * len(plaintext))()
-    encryption_params = [build_encryption_params(algorithm) for _ in range(count)]
-    setup_started = time.perf_counter()
     key_handle = None
     last_params = b""
     last_ciphertext = b""
     self_check_passed = False
 
     try:
+        setup_started = time.perf_counter()
+        data_buffer = (CK_BYTE * len(plaintext)).from_buffer_copy(plaintext)
+        data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
+        data_size = CK_ULONG(len(plaintext))
+        encrypted_buffer = (CK_BYTE * len(plaintext))()
+        encrypted_pointer = ctypes.cast(encrypted_buffer, CK_BYTE_PTR)
         key_handle = generate_secret_key(session, funcs, algorithm, mode_info)
+        encryption_operations = [
+            prepare_encryption_operation(algorithm, build_encryption_params(algorithm), len(plaintext))
+            for _ in range(warmup_count + count)
+        ]
         setup_elapsed = time.perf_counter() - setup_started
 
-        operation_times = []
-        total_started = time.perf_counter()
-        for params in encryption_params:
-            started = time.perf_counter()
-            encrypted_len, _ = encrypt_with_generated_key(
+        warmup_started = time.perf_counter()
+        for operation in encryption_operations[:warmup_count]:
+            encrypt_with_generated_key(
                 session,
                 funcs,
                 key_handle,
                 algorithm,
-                data_buffer,
-                len(plaintext),
-                encrypted_buffer,
-                params,
+                data_pointer,
+                data_size,
+                encrypted_pointer,
+                operation,
             )
-            operation_times.append(time.perf_counter() - started)
-            last_params = params
+        warmup_elapsed = time.perf_counter() - warmup_started
+
+        operation_times = []
+        total_started = time.perf_counter()
+        measured_operations = encryption_operations[warmup_count:]
+        for operation in measured_operations:
+            encrypted_len, operation_elapsed = encrypt_with_generated_key(
+                session,
+                funcs,
+                key_handle,
+                algorithm,
+                data_pointer,
+                data_size,
+                encrypted_pointer,
+                operation,
+            )
+            operation_times.append(operation_elapsed)
         total_elapsed = time.perf_counter() - total_started
+        last_params = measured_operations[-1]["params"]
         last_ciphertext = bytes(encrypted_buffer[:encrypted_len])
         decrypt_and_check(session, funcs, key_handle, algorithm, last_ciphertext, last_params, plaintext)
         self_check_passed = True
@@ -988,7 +1075,7 @@ def encrypt_file(session, funcs, slot_id):
             rv = funcs["C_DestroyObject"](session, key_handle)
             rv_ok(rv, "C_DestroyObject(secret encryption key)")
 
-    avg_elapsed = total_elapsed / count if count else 0.0
+    metrics = calculate_benchmark_metrics(len(plaintext), count, operation_times, total_elapsed)
     print(f"Режим шифрования: {mode_info['name']}")
     print(f"Алгоритм шифрования: {algorithm['name']}")
     print(f"Секретный ключ создан через C_GenerateKey: CKA_TOKEN={'TRUE' if mode_info['cka_token'] else 'FALSE'}")
@@ -1002,10 +1089,17 @@ def encrypt_file(session, funcs, slot_id):
     print(f"Файл: {file_path}")
     print(f"Размер исходных данных: {file_path.stat().st_size} байт")
     print(f"Количество шифрований: {count}")
-    print(f"Подготовка ключа: {setup_elapsed:.6f} сек")
-    print(f"Общее время шифрования: {total_elapsed:.6f} сек")
-    print(f"Среднее время одного шифрования: {avg_elapsed:.6f} сек")
-    print(f"Минимум: {min(operation_times):.6f} сек | Максимум: {max(operation_times):.6f} сек")
+    print(f"Прогрев: {warmup_count} операций за {warmup_elapsed:.6f} сек (не входит в измерение)")
+    print(f"Setup: {setup_elapsed:.6f} сек (ключ, параметры механизмов и буферы; не входит в измерение)")
+    print(f"PKCS#11 operation: {metrics['operation_elapsed']:.6f} сек")
+    print(f"Total измеряемого цикла: {metrics['total_elapsed']:.6f} сек")
+    print(f"Среднее время PKCS#11 operation: {metrics['average_operation']:.6f} сек")
+    print(
+        f"Минимум: {metrics['minimum_operation']:.6f} сек | "
+        f"Максимум: {metrics['maximum_operation']:.6f} сек"
+    )
+    print(f"Throughput PKCS#11 operation: {metrics['operation_throughput_mib_s']:.2f} MiB/s")
+    print(f"Throughput total: {metrics['total_throughput_mib_s']:.2f} MiB/s")
     print(f"Размер последнего шифротекста: {len(last_ciphertext)} байт")
     print("Последний шифротекст (Base64, первые 256 символов):")
     print(base64.b64encode(last_ciphertext).decode("ascii")[:256])
@@ -1048,6 +1142,7 @@ def sign_file(session, funcs):
         print(f"Файл не найден: {file_path}")
         return
     count = prompt_count()
+    warmup_count = prompt_warmup_count()
     pairs = find_pairs(session, funcs)
     if not pairs:
         print("Пары не найдены")
@@ -1064,37 +1159,51 @@ def sign_file(session, funcs):
         return
 
     data = file_path.read_bytes()
+    setup_started = time.perf_counter()
     data_buffer = (CK_BYTE * len(data)).from_buffer_copy(data)
+    data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
+    data_size = CK_ULONG(len(data))
     mechanism, mechanism_keepalive, hash_mode_name = signing_mechanism_for_pair(pair)
     signature_capacity = signature_buffer_length(session, funcs, pair)
     signature = (CK_BYTE * signature_capacity)()
-    signature_lengths = []
-    last_signature_bytes = b""
-    operation_times = []
-    total_started = time.perf_counter()
+    signature_pointer = ctypes.cast(signature, CK_BYTE_PTR)
+    output_lengths = [CK_ULONG(signature_capacity) for _ in range(warmup_count + count)]
+    setup_elapsed = time.perf_counter() - setup_started
 
-    for _ in range(count):
-        started = time.perf_counter()
-
-        rv = funcs["C_SignInit"](session, ctypes.byref(mechanism), private_key)
-        rv_ok(rv, "C_SignInit")
-
-        out_len = CK_ULONG(signature_capacity)
-        rv = funcs["C_Sign"](
+    warmup_started = time.perf_counter()
+    for output_length in output_lengths[:warmup_count]:
+        sign_once(
             session,
-            data_buffer,
-            CK_ULONG(len(data)),
-            ctypes.cast(signature, CK_BYTE_PTR),
-            ctypes.byref(out_len),
+            funcs,
+            private_key,
+            mechanism,
+            data_pointer,
+            data_size,
+            signature_pointer,
+            output_length,
         )
-        rv_ok(rv, "C_Sign(data)")
+    warmup_elapsed = time.perf_counter() - warmup_started
 
-        operation_times.append(time.perf_counter() - started)
-        signature_lengths.append(int(out_len.value))
-        last_signature_bytes = bytes(signature[: int(out_len.value)])
+    operation_times = []
+    measured_output_lengths = output_lengths[warmup_count:]
+    total_started = time.perf_counter()
+    for output_length in measured_output_lengths:
+        operation_elapsed = sign_once(
+            session,
+            funcs,
+            private_key,
+            mechanism,
+            data_pointer,
+            data_size,
+            signature_pointer,
+            output_length,
+        )
+        operation_times.append(operation_elapsed)
 
     total_elapsed = time.perf_counter() - total_started
-    avg_elapsed = total_elapsed / count if count else 0.0
+    last_signature_length = int(measured_output_lengths[-1].value)
+    last_signature_bytes = bytes(signature[:last_signature_length])
+    metrics = calculate_benchmark_metrics(len(data), count, operation_times, total_elapsed)
     signature_base64 = base64.b64encode(last_signature_bytes).decode("ascii") if last_signature_bytes else ""
     verify_signature(session, funcs, pair, data_buffer, len(data), last_signature_bytes)
 
@@ -1104,11 +1213,19 @@ def sign_file(session, funcs):
     print(f"Файл: {file_path}")
     print(f"Размер данных: {len(data)} байт")
     print(f"Количество подписаний: {count}")
-    print(f"Размер последней подписи: {signature_lengths[-1]} байт")
+    print(f"Размер последней подписи: {last_signature_length} байт")
     print("Самопроверка подписи: успешно")
-    print(f"Общее время: {total_elapsed:.6f} сек")
-    print(f"Среднее время одной подписи: {avg_elapsed:.6f} сек")
-    print(f"Минимум: {min(operation_times):.6f} сек | Максимум: {max(operation_times):.6f} сек")
+    print(f"Прогрев: {warmup_count} операций за {warmup_elapsed:.6f} сек (не входит в измерение)")
+    print(f"Setup: {setup_elapsed:.6f} сек (механизм и буферы; не входит в измерение)")
+    print(f"PKCS#11 operation: {metrics['operation_elapsed']:.6f} сек")
+    print(f"Total измеряемого цикла: {metrics['total_elapsed']:.6f} сек")
+    print(f"Среднее время PKCS#11 operation: {metrics['average_operation']:.6f} сек")
+    print(
+        f"Минимум: {metrics['minimum_operation']:.6f} сек | "
+        f"Максимум: {metrics['maximum_operation']:.6f} сек"
+    )
+    print(f"Throughput PKCS#11 operation: {metrics['operation_throughput_mib_s']:.2f} MiB/s")
+    print(f"Throughput total: {metrics['total_throughput_mib_s']:.2f} MiB/s")
     print("Подпись (Base64):")
     for line in textwrap.wrap(signature_base64, 64):
         print(line)

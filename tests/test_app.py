@@ -30,6 +30,41 @@ class MechanismParameterTests(unittest.TestCase):
         )
         self.assertIsNotNone(keepalive)
 
+    def test_encryption_operation_is_prepared_before_measurement(self):
+        params = bytes.fromhex("0000800001020304")
+        algorithm = {"encrypt_mechanism": app.CKM_MAGMA_CTR_ACPKM}
+        operation = app.prepare_encryption_operation(algorithm, params, 512000)
+        self.assertEqual(operation["params"], params)
+        self.assertEqual(int(operation["mechanism"].ulParameterLen), len(params))
+        self.assertEqual(
+            ctypes.string_at(operation["mechanism"].pParameter, int(operation["mechanism"].ulParameterLen)),
+            params,
+        )
+        self.assertEqual(int(operation["output_length"].value), 512000)
+        self.assertIsNotNone(operation["mechanism_keepalive"])
+
+
+class BenchmarkMetricTests(unittest.TestCase):
+    def test_metrics_separate_pkcs11_time_from_total_wall_time(self):
+        metrics = app.calculate_benchmark_metrics(
+            data_size=1024 * 1024,
+            count=2,
+            operation_times=[0.4, 0.6],
+            total_elapsed=1.25,
+        )
+        self.assertAlmostEqual(metrics["operation_elapsed"], 1.0)
+        self.assertAlmostEqual(metrics["average_operation"], 0.5)
+        self.assertAlmostEqual(metrics["minimum_operation"], 0.4)
+        self.assertAlmostEqual(metrics["maximum_operation"], 0.6)
+        self.assertAlmostEqual(metrics["operation_throughput_mib_s"], 2.0)
+        self.assertAlmostEqual(metrics["total_throughput_mib_s"], 1.6)
+
+    def test_warmup_default_is_configurable_and_zero_is_allowed(self):
+        with mock.patch("builtins.input", return_value=""):
+            self.assertEqual(app.prompt_warmup_count(), app.DEFAULT_WARMUP_COUNT)
+        with mock.patch("builtins.input", return_value="0"):
+            self.assertEqual(app.prompt_warmup_count(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
