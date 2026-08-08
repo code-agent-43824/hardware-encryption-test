@@ -13,12 +13,20 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            python_arch: x64
             artifact_name: hardware-encryption-test-linux-x64
             binary_path: dist/hardware-encryption-test
           - os: windows-latest
+            python_arch: x64
             artifact_name: hardware-encryption-test-windows-x64
             binary_path: dist/hardware-encryption-test.exe
+          - os: windows-11-arm
+            python_arch: arm64
+            artifact_name: hardware-encryption-test-windows-arm64
+            binary_path: dist/hardware-encryption-test.exe
+            verify_windows_arm64: true
           - os: macos-latest
+            python_arch: x64
             artifact_name: hardware-encryption-test-macos
             binary_path: dist/hardware-encryption-test
 
@@ -30,13 +38,19 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-          architecture: 'x64'
+          architecture: ${{ matrix.python_arch }}
 
       - name: Install PyInstaller
         run: python -m pip install pyinstaller==6.21.0
 
       - name: Build
         run: pyinstaller --onefile --name hardware-encryption-test app.py
+
+      - name: Verify Windows ARM64 executable
+        if: matrix.verify_windows_arm64
+        shell: pwsh
+        run: |
+          python -c "import pathlib, struct; data = pathlib.Path(r'${{ matrix.binary_path }}').read_bytes(); pe = struct.unpack_from('<I', data, 0x3c)[0]; machine = struct.unpack_from('<H', data, pe + 4)[0]; assert machine == 0xAA64, f'Expected ARM64 PE (0xAA64), got 0x{machine:04X}'; print('Verified ARM64 PE executable')"
 
       - name: Prepare artifact directory
         shell: bash

@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 
-APP_VERSION = "v2.8"
+APP_VERSION = "v2.9"
 CK_RV = ctypes.c_ulong
 CK_VOID_PTR = ctypes.c_void_p
 CK_ULONG = ctypes.c_ulong
