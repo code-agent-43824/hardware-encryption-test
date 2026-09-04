@@ -604,9 +604,11 @@ def build_ctr_acpkm_params(iv_size, period=0, iv=None):
         iv = secrets.token_bytes(iv_size)
     if len(iv) != iv_size:
         raise PKCS11Error(f"Неверная длина синхропосылки CTR-ACPKM: ожидалось {iv_size}, получено {len(iv)}")
+    if not isinstance(period, int) or isinstance(period, bool):
+        raise PKCS11Error(f"Период смены ключа CTR-ACPKM должен быть целым числом, получено: {type(period).__name__}")
     if period < 0 or period >= 1 << (CTR_ACPKM_PERIOD_FIELD_SIZE * 8):
         raise PKCS11Error(f"Недопустимый период смены ключа CTR-ACPKM: {period}")
-    return int(period).to_bytes(CTR_ACPKM_PERIOD_FIELD_SIZE, "big") + iv
+    return period.to_bytes(CTR_ACPKM_PERIOD_FIELD_SIZE, "big") + iv
 
 
 def print_pair(prefix, pair):
