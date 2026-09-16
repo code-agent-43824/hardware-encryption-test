@@ -1326,7 +1326,11 @@ def sign_file(session, funcs):
     last_signature_bytes = bytes(signature[:last_signature_length])
     metrics = calculate_benchmark_metrics(len(data), count, operation_times, total_elapsed)
     signature_base64 = base64.b64encode(last_signature_bytes).decode("ascii") if last_signature_bytes else ""
-    verify_signature(session, funcs, pair, data_buffer, len(data), last_signature_bytes)
+    try:
+        verify_signature(session, funcs, pair, data_buffer, len(data), last_signature_bytes)
+    except PKCS11Error:
+        print("Самопроверка подписи: НЕ УСПЕШНО — подпись не прошла проверку", file=sys.stderr)
+        raise
 
     print_pair("Подпись выполнена ключом", pair)
     print(f"Алгоритм подписи: {pair_algorithm_name(pair.get('algorithm'))}")
