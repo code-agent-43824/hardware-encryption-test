@@ -79,6 +79,7 @@ CKR_PIN_INCORRECT = 0x000000A0
 CKR_SESSION_HANDLE_INVALID = 0x000000B3
 CKR_USER_ALREADY_LOGGED_IN = 0x00000100
 CKR_USER_NOT_LOGGED_IN = 0x00000101
+CKR_SIGNATURE_INVALID = 0x000000C0
 
 DEFAULT_PIN = "12345678"
 DEFAULT_WARMUP_COUNT = 3
@@ -1328,8 +1329,11 @@ def sign_file(session, funcs):
     signature_base64 = base64.b64encode(last_signature_bytes).decode("ascii") if last_signature_bytes else ""
     try:
         verify_signature(session, funcs, pair, data_buffer, len(data), last_signature_bytes)
-    except PKCS11Error:
-        print("Самопроверка подписи: НЕ УСПЕШНО — подпись не прошла проверку", file=sys.stderr)
+    except PKCS11Error as error:
+        if error.rv == CKR_SIGNATURE_INVALID:
+            print("Самопроверка подписи: НЕ УСПЕШНО — подпись не прошла проверку", file=sys.stderr)
+        else:
+            print(f"Самопроверка подписи не выполнена: {error}", file=sys.stderr)
         raise
 
     print_pair("Подпись выполнена ключом", pair)
