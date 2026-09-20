@@ -78,6 +78,7 @@ CKR_CRYPTOKI_ALREADY_INITIALIZED = 0x00000191
 CKR_PIN_INCORRECT = 0x000000A0
 CKR_SESSION_HANDLE_INVALID = 0x000000B3
 CKR_USER_ALREADY_LOGGED_IN = 0x00000100
+CKR_BUFFER_TOO_SMALL = 0x00000130
 CKR_USER_NOT_LOGGED_IN = 0x00000101
 CKR_SIGNATURE_INVALID = 0x000000C0
 
@@ -987,6 +988,19 @@ def encrypt_with_generated_key(
         encrypted_pointer,
         ctypes.byref(prepared_operation["output_length"]),
     )
+    if rv == CKR_BUFFER_TOO_SMALL:
+        # По PKCS#11 после CKR_BUFFER_TOO_SMALL токен сообщает нужный размер,
+        # операция остаётся инициализированной — повторяем C_Encrypt с буфером нужного размера.
+        needed = int(prepared_operation["output_length"].value)
+        bigger_buffer = (CK_BYTE * needed)()
+        rv = funcs["C_Encrypt"](
+            session,
+            data_pointer,
+            data_size,
+            ctypes.cast(bigger_buffer, CK_BYTE_PTR),
+            ctypes.byref(prepared_operation["output_length"]),
+        )
+        encrypted_pointer = ctypes.cast(bigger_buffer, CK_BYTE_PTR)
     rv_ok(rv, f"C_Encrypt(data, {algorithm['name']})")
     elapsed = time.perf_counter() - started
     return int(prepared_operation["output_length"].value), elapsed
@@ -1148,7 +1162,7 @@ def encrypt_file(session, funcs, slot_id):
         data_buffer = (CK_BYTE * len(plaintext)).from_buffer_copy(plaintext)
         data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
         data_size = CK_ULONG(len(plaintext))
-        encrypted_buffer = (CK_BYTE * len(plaintext))()
+        encrypted_buffer = (CK_BYTE * (len(plaintext) + 32))()
         encrypted_pointer = ctypes.cast(encrypted_buffer, CK_BYTE_PTR)
         key_handle = generate_secret_key(session, funcs, algorithm, mode_info)
         encryption_operations = [
