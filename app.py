@@ -992,18 +992,22 @@ def encrypt_with_generated_key(
         # По PKCS#11 после CKR_BUFFER_TOO_SMALL токен сообщает нужный размер,
         # операция остаётся инициализированной — повторяем C_Encrypt с буфером нужного размера.
         needed = int(prepared_operation["output_length"].value)
-        bigger_buffer = (CK_BYTE * needed)()
+        output_buffer = (CK_BYTE * needed)()
         rv = funcs["C_Encrypt"](
             session,
             data_pointer,
             data_size,
-            ctypes.cast(bigger_buffer, CK_BYTE_PTR),
+            ctypes.cast(output_buffer, CK_BYTE_PTR),
             ctypes.byref(prepared_operation["output_length"]),
         )
-        encrypted_pointer = ctypes.cast(bigger_buffer, CK_BYTE_PTR)
+        rv_ok(rv, f"C_Encrypt(data, {algorithm['name']})")
+        elapsed = time.perf_counter() - started
+        output_length = int(prepared_operation["output_length"].value)
+        return output_length, elapsed, bytes(output_buffer[:output_length])
     rv_ok(rv, f"C_Encrypt(data, {algorithm['name']})")
     elapsed = time.perf_counter() - started
-    return int(prepared_operation["output_length"].value), elapsed
+    output_length = int(prepared_operation["output_length"].value)
+    return output_length, elapsed, ctypes.string_at(encrypted_pointer, output_length)
 
 
 def sign_once(session, funcs, private_key, mechanism, data_pointer, data_size, signature_pointer, output_length):
@@ -1189,7 +1193,7 @@ def encrypt_file(session, funcs, slot_id):
         total_started = time.perf_counter()
         measured_operations = encryption_operations[warmup_count:]
         for operation in measured_operations:
-            encrypted_len, operation_elapsed = encrypt_with_generated_key(
+            encrypted_len, operation_elapsed, ciphertext_bytes = encrypt_with_generated_key(
                 session,
                 funcs,
                 key_handle,
@@ -1202,7 +1206,7 @@ def encrypt_file(session, funcs, slot_id):
             operation_times.append(operation_elapsed)
         total_elapsed = time.perf_counter() - total_started
         last_params = measured_operations[-1]["params"]
-        last_ciphertext = bytes(encrypted_buffer[:encrypted_len])
+        last_ciphertext = ciphertext_bytes
         decrypt_and_check(session, funcs, key_handle, algorithm, last_ciphertext, last_params, plaintext)
         self_check_passed = True
     finally:
