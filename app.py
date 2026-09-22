@@ -1156,6 +1156,7 @@ def encrypt_file(session, funcs, slot_id):
             raise PKCS11Error(f"Токен не поддерживает механизм 0x{mechanism_type:08X} для {algorithm['name']}")
 
     plaintext = file_path.read_bytes()
+    sensitive_buffers = []
     key_handle = None
     last_params = b""
     last_ciphertext = b""
@@ -1164,9 +1165,11 @@ def encrypt_file(session, funcs, slot_id):
     try:
         setup_started = time.perf_counter()
         data_buffer = (CK_BYTE * len(plaintext)).from_buffer_copy(plaintext)
+        sensitive_buffers.append(data_buffer)
         data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
         data_size = CK_ULONG(len(plaintext))
         encrypted_buffer = (CK_BYTE * (len(plaintext) + 32))()
+        sensitive_buffers.append(encrypted_buffer)
         encrypted_pointer = ctypes.cast(encrypted_buffer, CK_BYTE_PTR)
         key_handle = generate_secret_key(session, funcs, algorithm, mode_info)
         encryption_operations = [
@@ -1218,6 +1221,8 @@ def encrypt_file(session, funcs, slot_id):
                     print(f"Предупреждение при очистке после исходной ошибки: {cleanup_error}", file=sys.stderr)
                 else:
                     raise cleanup_error
+        for buffer in sensitive_buffers:
+            ctypes.memset(buffer, 0, len(buffer))
 
     metrics = calculate_benchmark_metrics(len(plaintext), count, operation_times, total_elapsed)
     print(f"Режим шифрования: {mode_info['name']}")
@@ -1299,74 +1304,83 @@ def sign_file(session, funcs):
         return
 
     data = file_path.read_bytes()
+    sensitive_buffers = []
     setup_started = time.perf_counter()
     data_buffer = (CK_BYTE * len(data)).from_buffer_copy(data)
+    sensitive_buffers.append(data_buffer)
     data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
     data_size = CK_ULONG(len(data))
     mechanism, mechanism_keepalive, hash_mode_name = signing_mechanism_for_pair(pair)
     signature_capacity = signature_buffer_length(session, funcs, pair)
     signature = (CK_BYTE * signature_capacity)()
+    sensitive_buffers.append(signature)
     signature_pointer = ctypes.cast(signature, CK_BYTE_PTR)
     output_lengths = [CK_ULONG(signature_capacity) for _ in range(warmup_count + count)]
     setup_elapsed = time.perf_counter() - setup_started
 
-    warmup_started = time.perf_counter()
-    for output_length in output_lengths[:warmup_count]:
-        sign_once(
-            session,
-            funcs,
-            private_key,
-            mechanism,
-            data_pointer,
-            data_size,
-            signature_pointer,
-            output_length,
-        )
-    warmup_elapsed = time.perf_counter() - warmup_started
-
-    operation_times = []
-    measured_output_lengths = output_lengths[warmup_count:]
-    total_started = time.perf_counter()
-    for output_length in measured_output_lengths:
-        operation_elapsed = sign_once(
-            session,
-            funcs,
-            private_key,
-            mechanism,
-            data_pointer,
-            data_size,
-            signature_pointer,
-            output_length,
-        )
-        operation_times.append(operation_elapsed)
-
-    total_elapsed = time.perf_counter() - total_started
-    last_signature_length = int(measured_output_lengths[-1].value)
-    last_signature_bytes = bytes(signature[:last_signature_length])
-    metrics = calculate_benchmark_metrics(len(data), count, operation_times, total_elapsed)
-    signature_base64 = base64.b64encode(last_signature_bytes).decode("ascii") if last_signature_bytes else ""
     try:
-        verify_signature(session, funcs, pair, data_buffer, len(data), last_signature_bytes)
-    except PKCS11Error as error:
-        if error.rv == CKR_SIGNATURE_INVALID:
-            print("Самопроверка подписи: НЕ УСПЕШНО — подпись не прошла проверку", file=sys.stderr)
-        else:
-            print(f"Самопроверка подписи не выполнена: {error}", file=sys.stderr)
-        raise
 
-    print_pair("Подпись выполнена ключом", pair)
-    print(f"Алгоритм подписи: {pair_algorithm_name(pair.get('algorithm'))}")
-    print(f"Режим хеширования: {hash_mode_name}")
-    print(f"Файл: {file_path}")
-    print(f"Размер данных: {len(data)} байт")
-    print(f"Количество подписаний: {count}")
-    print(f"Размер последней подписи: {last_signature_length} байт")
-    print("Самопроверка подписи: успешно")
-    print_benchmark_metrics(metrics, warmup_count, warmup_elapsed, setup_elapsed, "механизм и буферы")
-    print("Подпись (Base64):")
-    for line in textwrap.wrap(signature_base64, 64):
-        print(line)
+        warmup_started = time.perf_counter()
+        for output_length in output_lengths[:warmup_count]:
+            sign_once(
+                session,
+                funcs,
+                private_key,
+                mechanism,
+                data_pointer,
+                data_size,
+                signature_pointer,
+                output_length,
+            )
+        warmup_elapsed = time.perf_counter() - warmup_started
 
+        operation_times = []
+        measured_output_lengths = output_lengths[warmup_count:]
+        total_started = time.perf_counter()
+        for output_length in measured_output_lengths:
+            operation_elapsed = sign_once(
+                session,
+                funcs,
+                private_key,
+                mechanism,
+                data_pointer,
+                data_size,
+                signature_pointer,
+                output_length,
+            )
+            operation_times.append(operation_elapsed)
+
+        total_elapsed = time.perf_counter() - total_started
+        last_signature_length = int(measured_output_lengths[-1].value)
+        last_signature_bytes = bytes(signature[:last_signature_length])
+        metrics = calculate_benchmark_metrics(len(data), count, operation_times, total_elapsed)
+        signature_base64 = base64.b64encode(last_signature_bytes).decode("ascii") if last_signature_bytes else ""
+        try:
+            verify_signature(session, funcs, pair, data_buffer, len(data), last_signature_bytes)
+        except PKCS11Error as error:
+            if error.rv == CKR_SIGNATURE_INVALID:
+                print("Самопроверка подписи: НЕ УСПЕШНО — подпись не прошла проверку", file=sys.stderr)
+            else:
+                print(f"Самопроверка подписи не выполнена: {error}", file=sys.stderr)
+            raise
+
+        print_pair("Подпись выполнена ключом", pair)
+        print(f"Алгоритм подписи: {pair_algorithm_name(pair.get('algorithm'))}")
+        print(f"Режим хеширования: {hash_mode_name}")
+        print(f"Файл: {file_path}")
+        print(f"Размер данных: {len(data)} байт")
+        print(f"Количество подписаний: {count}")
+        print(f"Размер последней подписи: {last_signature_length} байт")
+        print("Самопроверка подписи: успешно")
+        print_benchmark_metrics(metrics, warmup_count, warmup_elapsed, setup_elapsed, "механизм и буферы")
+        print("Подпись (Base64):")
+        for line in textwrap.wrap(signature_base64, 64):
+            print(line)
+
+
+    finally:
+        for buffer in sensitive_buffers:
+            ctypes.memset(buffer, 0, len(buffer))
 
 def show_menu():
     print()
