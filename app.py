@@ -1134,6 +1134,11 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
     rv_ok(rv, "C_Verify(self-check)")
 
 
+# Worst-case ciphertext overhead for supported modes: prepended IV/nonce
+# (up to 16 bytes) plus padding or authentication tag (up to 16 bytes).
+MAX_CIPHERTEXT_OVERHEAD = 32
+
+
 def encrypt_file(session, funcs, slot_id):
     raw_path = input("Что зашифровать? ").strip().strip('"')
     file_path = resolve_sample_file_path(raw_path)
@@ -1168,7 +1173,7 @@ def encrypt_file(session, funcs, slot_id):
         sensitive_buffers.append(data_buffer)
         data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
         data_size = CK_ULONG(len(plaintext))
-        encrypted_buffer = (CK_BYTE * (len(plaintext) + 32))()
+        encrypted_buffer = (CK_BYTE * (len(plaintext) + MAX_CIPHERTEXT_OVERHEAD))()
         sensitive_buffers.append(encrypted_buffer)
         encrypted_pointer = ctypes.cast(encrypted_buffer, CK_BYTE_PTR)
         key_handle = generate_secret_key(session, funcs, algorithm, mode_info)
