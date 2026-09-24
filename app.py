@@ -1160,8 +1160,26 @@ def encrypt_file(session, funcs, slot_id):
         if mechanism_type not in mechanisms:
             raise PKCS11Error(f"Токен не поддерживает механизм 0x{mechanism_type:08X} для {algorithm['name']}")
 
-    plaintext = file_path.read_bytes()
+    # Читаем файл сразу в затираемый ctypes-буфер: обычный bytes нельзя
+    # обнулить, и открытый текст оставался бы в heap до GC.
+    file_size = file_path.stat().st_size
     sensitive_buffers = []
+    data_buffer = (CK_BYTE * file_size)()
+    sensitive_buffers.append(data_buffer)
+    with open(file_path, "rb") as handle:
+        chunk_size = 1 << 20
+        offset = 0
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            data_buffer[offset:offset + len(chunk)] = chunk
+            offset += len(chunk)
+        if offset != file_size:
+            raise PKCS11Error(f"Размер файла изменился при чтении: {file_path}")
+    data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
+    data_size = CK_ULONG(file_size)
+    data_view = memoryview(data_buffer)
     key_handle = None
     last_params = b""
     last_ciphertext = b""
@@ -1169,16 +1187,12 @@ def encrypt_file(session, funcs, slot_id):
 
     try:
         setup_started = time.perf_counter()
-        data_buffer = (CK_BYTE * len(plaintext)).from_buffer_copy(plaintext)
-        sensitive_buffers.append(data_buffer)
-        data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
-        data_size = CK_ULONG(len(plaintext))
-        encrypted_buffer = (CK_BYTE * (len(plaintext) + MAX_CIPHERTEXT_OVERHEAD))()
+        encrypted_buffer = (CK_BYTE * (file_size + MAX_CIPHERTEXT_OVERHEAD))()
         sensitive_buffers.append(encrypted_buffer)
         encrypted_pointer = ctypes.cast(encrypted_buffer, CK_BYTE_PTR)
         key_handle = generate_secret_key(session, funcs, algorithm, mode_info)
         encryption_operations = [
-            prepare_encryption_operation(algorithm, build_encryption_params(algorithm), len(plaintext))
+            prepare_encryption_operation(algorithm, build_encryption_params(algorithm), file_size)
             for _ in range(warmup_count + count)
         ]
         setup_elapsed = time.perf_counter() - setup_started
@@ -1215,7 +1229,7 @@ def encrypt_file(session, funcs, slot_id):
         total_elapsed = time.perf_counter() - total_started
         last_params = measured_operations[-1]["params"]
         last_ciphertext = ciphertext_bytes
-        decrypt_and_check(session, funcs, key_handle, algorithm, last_ciphertext, last_params, plaintext)
+        decrypt_and_check(session, funcs, key_handle, algorithm, last_ciphertext, last_params, bytes(data_view))
         self_check_passed = True
     finally:
         if key_handle:
@@ -1229,7 +1243,7 @@ def encrypt_file(session, funcs, slot_id):
         for buffer in sensitive_buffers:
             ctypes.memset(buffer, 0, len(buffer))
 
-    metrics = calculate_benchmark_metrics(len(plaintext), count, operation_times, total_elapsed)
+    metrics = calculate_benchmark_metrics(file_size, count, operation_times, total_elapsed)
     print(f"Режим шифрования: {mode_info['name']}")
     print(f"Алгоритм шифрования: {algorithm['name']}")
     print(f"Секретный ключ создан через C_GenerateKey: CKA_TOKEN={'TRUE' if mode_info['cka_token'] else 'FALSE'}")
