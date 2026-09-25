@@ -1179,7 +1179,6 @@ def encrypt_file(session, funcs, slot_id):
             raise PKCS11Error(f"Размер файла изменился при чтении: {file_path}")
     data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
     data_size = CK_ULONG(file_size)
-    data_view = memoryview(data_buffer)
     key_handle = None
     last_params = b""
     last_ciphertext = b""
@@ -1229,7 +1228,7 @@ def encrypt_file(session, funcs, slot_id):
         total_elapsed = time.perf_counter() - total_started
         last_params = measured_operations[-1]["params"]
         last_ciphertext = ciphertext_bytes
-        decrypt_and_check(session, funcs, key_handle, algorithm, last_ciphertext, last_params, bytes(data_view))
+        decrypt_and_check(session, funcs, key_handle, algorithm, last_ciphertext, last_params, memoryview(data_buffer))
         self_check_passed = True
     finally:
         if key_handle:
