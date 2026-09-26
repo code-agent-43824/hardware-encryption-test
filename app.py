@@ -1322,21 +1322,20 @@ def sign_file(session, funcs):
         return
 
     data = file_path.read_bytes()
-    sensitive_buffers = []
-    setup_started = time.perf_counter()
-    data_buffer = (CK_BYTE * len(data)).from_buffer_copy(data)
-    sensitive_buffers.append(data_buffer)
-    data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
-    data_size = CK_ULONG(len(data))
-    mechanism, mechanism_keepalive, hash_mode_name = signing_mechanism_for_pair(pair)
-    signature_capacity = signature_buffer_length(session, funcs, pair)
-    signature = (CK_BYTE * signature_capacity)()
-    sensitive_buffers.append(signature)
-    signature_pointer = ctypes.cast(signature, CK_BYTE_PTR)
-    output_lengths = [CK_ULONG(signature_capacity) for _ in range(warmup_count + count)]
-    setup_elapsed = time.perf_counter() - setup_started
-
     try:
+        sensitive_buffers = []
+        setup_started = time.perf_counter()
+        data_buffer = (CK_BYTE * len(data)).from_buffer_copy(data)
+        sensitive_buffers.append(data_buffer)
+        data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
+        data_size = CK_ULONG(len(data))
+        mechanism, mechanism_keepalive, hash_mode_name = signing_mechanism_for_pair(pair)
+        signature_capacity = signature_buffer_length(session, funcs, pair)
+        signature = (CK_BYTE * signature_capacity)()
+        sensitive_buffers.append(signature)
+        signature_pointer = ctypes.cast(signature, CK_BYTE_PTR)
+        output_lengths = [CK_ULONG(signature_capacity) for _ in range(warmup_count + count)]
+        setup_elapsed = time.perf_counter() - setup_started
 
         warmup_started = time.perf_counter()
         for output_length in output_lengths[:warmup_count]:
