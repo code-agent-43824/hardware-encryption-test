@@ -1166,17 +1166,23 @@ def encrypt_file(session, funcs, slot_id):
     sensitive_buffers = []
     data_buffer = (CK_BYTE * file_size)()
     sensitive_buffers.append(data_buffer)
-    with open(file_path, "rb") as handle:
-        chunk_size = 1 << 20
-        offset = 0
-        while True:
-            chunk = handle.read(chunk_size)
-            if not chunk:
-                break
-            data_buffer[offset:offset + len(chunk)] = chunk
-            offset += len(chunk)
-        if offset != file_size:
-            raise PKCS11Error(f"Размер файла изменился при чтении: {file_path}")
+    try:
+        with open(file_path, "rb") as handle:
+            chunk_size = 1 << 20
+            offset = 0
+            while True:
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    break
+                data_buffer[offset:offset + len(chunk)] = chunk
+                offset += len(chunk)
+            if offset != file_size:
+                raise PKCS11Error(f"Размер файла изменился при чтении: {file_path}")
+    except BaseException:
+        # Буфер уже содержит (возможно, частично) открытый текст —
+        # затираем его перед тем, как отдать исключение наверх.
+        ctypes.memset(data_buffer, 0, len(data_buffer))
+        raise
     data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
     data_size = CK_ULONG(file_size)
     key_handle = None
