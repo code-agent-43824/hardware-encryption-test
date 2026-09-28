@@ -1327,14 +1327,33 @@ def sign_file(session, funcs):
         print("У найденной пары нет открытого ключа, обязательная самопроверка подписи невозможна")
         return
 
-    data = file_path.read_bytes()
+    # Читаем файл сразу в затираемый ctypes-буфер: обычные bytes нельзя
+    # обнулить, и открытый текст оставался бы в heap до GC.
+    file_size = file_path.stat().st_size
+    sensitive_buffers = []
+    data_buffer = (CK_BYTE * file_size)()
+    sensitive_buffers.append(data_buffer)
     try:
-        sensitive_buffers = []
+        with open(file_path, "rb") as handle:
+            chunk_size = 1 << 20
+            offset = 0
+            while True:
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    break
+                data_buffer[offset:offset + len(chunk)] = chunk
+                offset += len(chunk)
+            if offset != file_size:
+                raise PKCS11Error(f"Размер файла изменился при чтении: {file_path}")
+    except BaseException:
+        # Буфер уже содержит (возможно, частично) открытый текст —
+        # затираем его перед тем, как отдать исключение наверх.
+        ctypes.memset(data_buffer, 0, len(data_buffer))
+        raise
+    try:
         setup_started = time.perf_counter()
-        data_buffer = (CK_BYTE * len(data)).from_buffer_copy(data)
-        sensitive_buffers.append(data_buffer)
         data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
-        data_size = CK_ULONG(len(data))
+        data_size = CK_ULONG(file_size)
         mechanism, mechanism_keepalive, hash_mode_name = signing_mechanism_for_pair(pair)
         signature_capacity = signature_buffer_length(session, funcs, pair)
         signature = (CK_BYTE * signature_capacity)()
@@ -1376,10 +1395,10 @@ def sign_file(session, funcs):
         total_elapsed = time.perf_counter() - total_started
         last_signature_length = int(measured_output_lengths[-1].value)
         last_signature_bytes = bytes(signature[:last_signature_length])
-        metrics = calculate_benchmark_metrics(len(data), count, operation_times, total_elapsed)
+        metrics = calculate_benchmark_metrics(file_size, count, operation_times, total_elapsed)
         signature_base64 = base64.b64encode(last_signature_bytes).decode("ascii") if last_signature_bytes else ""
         try:
-            verify_signature(session, funcs, pair, data_buffer, len(data), last_signature_bytes)
+            verify_signature(session, funcs, pair, data_buffer, file_size, last_signature_bytes)
         except PKCS11Error as error:
             if error.rv == CKR_SIGNATURE_INVALID:
                 print("Самопроверка подписи: НЕ УСПЕШНО — подпись не прошла проверку", file=sys.stderr)
@@ -1391,7 +1410,7 @@ def sign_file(session, funcs):
         print(f"Алгоритм подписи: {pair_algorithm_name(pair.get('algorithm'))}")
         print(f"Режим хеширования: {hash_mode_name}")
         print(f"Файл: {file_path}")
-        print(f"Размер данных: {len(data)} байт")
+        print(f"Размер данных: {file_size} байт")
         print(f"Количество подписаний: {count}")
         print(f"Размер последней подписи: {last_signature_length} байт")
         print("Самопроверка подписи: успешно")
