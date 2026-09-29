@@ -1070,9 +1070,16 @@ def decrypt_and_check(session, funcs, key_handle, algorithm, ciphertext, params,
         ctypes.byref(plaintext_len),
     )
     rv_ok(rv, f"C_Decrypt(data, {algorithm['name']})")
-    decrypted = bytes(plaintext[: int(plaintext_len.value)])
-    if decrypted != expected_plaintext:
-        raise PKCS11Error(f"Самопроверка расшифрования {algorithm['name']} не пройдена")
+    # Сравниваем затираемый буфер напрямую, без bytes(): иммутабельная
+    # копия открытого текста оставалась бы в heap до GC. Оба локальных
+    # буфера (открытый текст и шифротекст) затираем в finally.
+    decrypted = memoryview(plaintext)[: int(plaintext_len.value)]
+    try:
+        if decrypted != expected_plaintext:
+            raise PKCS11Error(f"Самопроверка расшифрования {algorithm['name']} не пройдена")
+    finally:
+        ctypes.memset(plaintext, 0, len(plaintext))
+        ctypes.memset(ciphertext_buffer, 0, len(ciphertext_buffer))
     return mechanism_keepalive
 
 
