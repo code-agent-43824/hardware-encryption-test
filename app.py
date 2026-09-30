@@ -1244,16 +1244,20 @@ def encrypt_file(session, funcs, slot_id):
         decrypt_and_check(session, funcs, key_handle, algorithm, last_ciphertext, last_params, memoryview(data_buffer))
         self_check_passed = True
     finally:
+        cleanup_error = None
         if key_handle:
             rv = funcs["C_DestroyObject"](session, key_handle)
             if rv != CKR_OK:
                 cleanup_error = PKCS11Error("C_DestroyObject(secret encryption key)", rv)
-                if sys.exc_info()[0] is not None:
-                    print(f"Предупреждение при очистке после исходной ошибки: {cleanup_error}", file=sys.stderr)
-                else:
-                    raise cleanup_error
+        # Затираем буферы до любого raise: прерывание finally раньше memset
+        # оставляло бы открытый текст и шифротекст в памяти незатёртыми.
         for buffer in sensitive_buffers:
             ctypes.memset(buffer, 0, len(buffer))
+        if cleanup_error is not None:
+            if sys.exc_info()[0] is not None:
+                print(f"Предупреждение при очистке после исходной ошибки: {cleanup_error}", file=sys.stderr)
+            else:
+                raise cleanup_error
 
     metrics = calculate_benchmark_metrics(file_size, count, operation_times, total_elapsed)
     print(f"Режим шифрования: {mode_info['name']}")
