@@ -252,6 +252,35 @@ def resolve_sample_file_path(raw_path):
     return base / SAMPLE_FILE_NAMES[0]
 
 
+def read_file_into_wipeable_buffer(file_path):
+    """Читает файл в затираемый ctypes-буфер.
+
+    Обычный bytes нельзя обнулить, и открытый текст оставался бы в heap
+    до GC, поэтому файл читается сразу в ctypes-буфер по частям. При любой
+    ошибке (в том числе изменившемся размере файла) буфер, уже содержащий
+    возможно частичный открытый текст, затирается перед пробросом исключения.
+    Возвращает (буфер, размер файла в байтах).
+    """
+    file_size = file_path.stat().st_size
+    data_buffer = (CK_BYTE * file_size)()
+    try:
+        with open(file_path, "rb") as handle:
+            chunk_size = 1 << 20
+            offset = 0
+            while True:
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    break
+                data_buffer[offset:offset + len(chunk)] = chunk
+                offset += len(chunk)
+            if offset != file_size:
+                raise PKCS11Error(f"Размер файла изменился при чтении: {file_path}")
+    except BaseException:
+        ctypes.memset(data_buffer, 0, len(data_buffer))
+        raise
+    return data_buffer, file_size
+
+
 def bind_function(library, name, argtypes, restype=CK_RV):
     func = getattr(library, name)
     func.argtypes = argtypes
@@ -1169,27 +1198,9 @@ def encrypt_file(session, funcs, slot_id):
 
     # Читаем файл сразу в затираемый ctypes-буфер: обычный bytes нельзя
     # обнулить, и открытый текст оставался бы в heap до GC.
-    file_size = file_path.stat().st_size
     sensitive_buffers = []
-    data_buffer = (CK_BYTE * file_size)()
+    data_buffer, file_size = read_file_into_wipeable_buffer(file_path)
     sensitive_buffers.append(data_buffer)
-    try:
-        with open(file_path, "rb") as handle:
-            chunk_size = 1 << 20
-            offset = 0
-            while True:
-                chunk = handle.read(chunk_size)
-                if not chunk:
-                    break
-                data_buffer[offset:offset + len(chunk)] = chunk
-                offset += len(chunk)
-            if offset != file_size:
-                raise PKCS11Error(f"Размер файла изменился при чтении: {file_path}")
-    except BaseException:
-        # Буфер уже содержит (возможно, частично) открытый текст —
-        # затираем его перед тем, как отдать исключение наверх.
-        ctypes.memset(data_buffer, 0, len(data_buffer))
-        raise
     data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
     data_size = CK_ULONG(file_size)
     key_handle = None
@@ -1340,27 +1351,9 @@ def sign_file(session, funcs):
 
     # Читаем файл сразу в затираемый ctypes-буфер: обычные bytes нельзя
     # обнулить, и открытый текст оставался бы в heap до GC.
-    file_size = file_path.stat().st_size
     sensitive_buffers = []
-    data_buffer = (CK_BYTE * file_size)()
+    data_buffer, file_size = read_file_into_wipeable_buffer(file_path)
     sensitive_buffers.append(data_buffer)
-    try:
-        with open(file_path, "rb") as handle:
-            chunk_size = 1 << 20
-            offset = 0
-            while True:
-                chunk = handle.read(chunk_size)
-                if not chunk:
-                    break
-                data_buffer[offset:offset + len(chunk)] = chunk
-                offset += len(chunk)
-            if offset != file_size:
-                raise PKCS11Error(f"Размер файла изменился при чтении: {file_path}")
-    except BaseException:
-        # Буфер уже содержит (возможно, частично) открытый текст —
-        # затираем его перед тем, как отдать исключение наверх.
-        ctypes.memset(data_buffer, 0, len(data_buffer))
-        raise
     try:
         setup_started = time.perf_counter()
         data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
