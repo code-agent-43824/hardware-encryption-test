@@ -1206,6 +1206,7 @@ def encrypt_file(session, funcs, slot_id):
     key_handle = None
     last_params = b""
     last_ciphertext = b""
+    ciphertext_bytes = b""
     self_check_passed = False
 
     try:
@@ -1237,6 +1238,8 @@ def encrypt_file(session, funcs, slot_id):
         operation_times = []
         total_started = time.perf_counter()
         measured_operations = encryption_operations[warmup_count:]
+        if not measured_operations:
+            raise PKCS11Error("Нет ни одной операции шифрования: количество и прогрев должны быть больше 0")
         for operation in measured_operations:
             encrypted_len, operation_elapsed, ciphertext_bytes = encrypt_with_generated_key(
                 session,
