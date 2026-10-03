@@ -1,5 +1,6 @@
 import ctypes
 import io
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -69,6 +70,86 @@ class BenchmarkMetricTests(unittest.TestCase):
 
 
 class ReliabilityTests(unittest.TestCase):
+    def test_file_is_read_into_wipeable_buffer_without_read_bytes(self):
+        class ReadIntoOnly(io.BytesIO):
+            def read(self, *_args):
+                raise AssertionError("an immutable bytes chunk was requested")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sample"
+            path.write_bytes(b"sample data")
+            with mock.patch("builtins.open", return_value=ReadIntoOnly(b"sample data")):
+                buffer, size = app.read_file_into_wipeable_buffer(path)
+        self.assertEqual(size, 11)
+        self.assertEqual(bytes(buffer), b"sample data")
+
+    def test_decrypt_error_wipes_partially_written_plaintext(self):
+        captured = {}
+
+        def fail_decrypt(_session, ciphertext, size, plaintext, _length):
+            length = int(size.value)
+            captured["ciphertext"] = ctypes.cast(ciphertext, ctypes.POINTER(app.CK_BYTE * length)).contents
+            captured["plaintext"] = ctypes.cast(plaintext, ctypes.POINTER(app.CK_BYTE * length)).contents
+            ctypes.memmove(plaintext, b"SECRET", length)
+            return 5
+
+        funcs = {"C_DecryptInit": lambda *_args: app.CKR_OK, "C_Decrypt": fail_decrypt}
+        with self.assertRaises(app.PKCS11Error):
+            app.decrypt_and_check(
+                1, funcs, 1, {"name": "test", "encrypt_mechanism": 1}, b"cipher", b"", b"SECRET"
+            )
+        self.assertEqual(bytes(captured["plaintext"]), b"\0" * 6)
+        self.assertEqual(bytes(captured["ciphertext"]), b"\0" * 6)
+
+    def test_encrypt_retry_returns_wipeable_buffer(self):
+        payload = b"abc"
+        source = (app.CK_BYTE * len(payload)).from_buffer_copy(payload)
+        destination = (app.CK_BYTE * 5)()
+        calls = []
+
+        def encrypt(_session, _data, _size, output, output_length):
+            calls.append(1)
+            length = ctypes.cast(output_length, ctypes.POINTER(app.CK_ULONG))
+            if len(calls) == 1:
+                length[0] = 5
+                return app.CKR_BUFFER_TOO_SMALL
+            ctypes.memmove(output, b"abcXY", 5)
+            length[0] = 5
+            return app.CKR_OK
+
+        funcs = {"C_EncryptInit": lambda *_args: app.CKR_OK, "C_Encrypt": encrypt}
+        operation = app.prepare_encryption_operation({"encrypt_mechanism": 1}, b"", 3)
+        output_length, _, output = app.encrypt_with_generated_key(
+            1, funcs, 1, {"name": "test"}, source, app.CK_ULONG(3), destination, operation
+        )
+        self.assertEqual(output_length, 5)
+        self.assertEqual(len(calls), 2)
+        self.assertIsInstance(output, ctypes.Array)
+        self.assertEqual(bytes(output), b"abcXY")
+
+    def test_encrypt_retry_failure_wipes_temporary_output(self):
+        captured = {}
+        calls = []
+
+        def encrypt(_session, _data, _size, output, output_length):
+            calls.append(1)
+            length = ctypes.cast(output_length, ctypes.POINTER(app.CK_ULONG))
+            if len(calls) == 1:
+                length[0] = 6
+                return app.CKR_BUFFER_TOO_SMALL
+            captured["output"] = ctypes.cast(output, ctypes.POINTER(app.CK_BYTE * 6)).contents
+            ctypes.memmove(output, b"SECRET", 6)
+            return 5
+
+        funcs = {"C_EncryptInit": lambda *_args: app.CKR_OK, "C_Encrypt": encrypt}
+        operation = app.prepare_encryption_operation({"encrypt_mechanism": 1}, b"", 3)
+        with self.assertRaises(app.PKCS11Error):
+            app.encrypt_with_generated_key(
+                1, funcs, 1, {"name": "test"}, (app.CK_BYTE * 3)(), app.CK_ULONG(3),
+                (app.CK_BYTE * 3)(), operation,
+            )
+        self.assertEqual(bytes(captured["output"]), b"\0" * 6)
+
     def test_macos_default_library_uses_installed_system_path(self):
         with mock.patch.object(app.platform, "system", return_value="Darwin"):
             self.assertEqual(app.default_library_path(), Path("/usr/local/lib/librtpkcs11ecp.dylib"))

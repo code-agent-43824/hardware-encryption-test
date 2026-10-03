@@ -255,29 +255,33 @@ def resolve_sample_file_path(raw_path):
 def read_file_into_wipeable_buffer(file_path):
     """Читает файл в затираемый ctypes-буфер.
 
-    Обычный bytes нельзя обнулить, и открытый текст оставался бы в heap
-    до GC, поэтому файл читается сразу в ctypes-буфер по частям. При любой
+    Обычный bytes нельзя обнулить, поэтому readinto заполняет ctypes-буфер
+    без промежуточных bytes-чанков. При любой
     ошибке (в том числе изменившемся размере файла) буфер, уже содержащий
     возможно частичный открытый текст, затирается перед пробросом исключения.
     Возвращает (буфер, размер файла в байтах).
     """
     file_size = file_path.stat().st_size
     data_buffer = (CK_BYTE * file_size)()
+    writable = memoryview(data_buffer).cast("B")
+    probe = bytearray(1)
     try:
         with open(file_path, "rb") as handle:
-            chunk_size = 1 << 20
             offset = 0
-            while True:
-                chunk = handle.read(chunk_size)
-                if not chunk:
-                    break
-                data_buffer[offset:offset + len(chunk)] = chunk
-                offset += len(chunk)
-            if offset != file_size:
+            while offset < file_size:
+                length = min(1 << 20, file_size - offset)
+                received = handle.readinto(writable[offset:offset + length])
+                if not received:
+                    raise PKCS11Error(f"Размер файла изменился при чтении: {file_path}")
+                offset += received
+            if handle.readinto(probe):
                 raise PKCS11Error(f"Размер файла изменился при чтении: {file_path}")
     except BaseException:
         ctypes.memset(data_buffer, 0, len(data_buffer))
         raise
+    finally:
+        probe[0] = 0
+        writable.release()
     return data_buffer, file_size
 
 
@@ -1003,7 +1007,7 @@ def encrypt_with_generated_key(
     algorithm,
     data_pointer,
     data_size,
-    encrypted_pointer,
+    encrypted_buffer,
     prepared_operation,
 ):
     started = time.perf_counter()
@@ -1014,7 +1018,7 @@ def encrypt_with_generated_key(
         session,
         data_pointer,
         data_size,
-        encrypted_pointer,
+        ctypes.cast(encrypted_buffer, CK_BYTE_PTR),
         ctypes.byref(prepared_operation["output_length"]),
     )
     if rv == CKR_BUFFER_TOO_SMALL:
@@ -1022,21 +1026,25 @@ def encrypt_with_generated_key(
         # операция остаётся инициализированной — повторяем C_Encrypt с буфером нужного размера.
         needed = int(prepared_operation["output_length"].value)
         output_buffer = (CK_BYTE * needed)()
-        rv = funcs["C_Encrypt"](
-            session,
-            data_pointer,
-            data_size,
-            ctypes.cast(output_buffer, CK_BYTE_PTR),
-            ctypes.byref(prepared_operation["output_length"]),
-        )
-        rv_ok(rv, f"C_Encrypt(data, {algorithm['name']})")
+        try:
+            rv = funcs["C_Encrypt"](
+                session,
+                data_pointer,
+                data_size,
+                ctypes.cast(output_buffer, CK_BYTE_PTR),
+                ctypes.byref(prepared_operation["output_length"]),
+            )
+            rv_ok(rv, f"C_Encrypt(data, {algorithm['name']})")
+        except BaseException:
+            ctypes.memset(output_buffer, 0, len(output_buffer))
+            raise
         elapsed = time.perf_counter() - started
         output_length = int(prepared_operation["output_length"].value)
-        return output_length, elapsed, bytes(output_buffer[:output_length])
+        return output_length, elapsed, output_buffer
     rv_ok(rv, f"C_Encrypt(data, {algorithm['name']})")
     elapsed = time.perf_counter() - started
     output_length = int(prepared_operation["output_length"].value)
-    return output_length, elapsed, ctypes.string_at(encrypted_pointer, output_length)
+    return output_length, elapsed, encrypted_buffer
 
 
 def sign_once(session, funcs, private_key, mechanism, data_pointer, data_size, signature_pointer, output_length):
@@ -1089,25 +1097,25 @@ def decrypt_and_check(session, funcs, key_handle, algorithm, ciphertext, params,
     rv_ok(rv, f"C_DecryptInit({algorithm['name']})")
 
     ciphertext_buffer = (CK_BYTE * len(ciphertext)).from_buffer_copy(ciphertext)
-    plaintext = (CK_BYTE * len(ciphertext))()
-    plaintext_len = CK_ULONG(len(plaintext))
-    rv = funcs["C_Decrypt"](
-        session,
-        ciphertext_buffer,
-        CK_ULONG(len(ciphertext)),
-        ctypes.cast(plaintext, CK_BYTE_PTR),
-        ctypes.byref(plaintext_len),
-    )
-    rv_ok(rv, f"C_Decrypt(data, {algorithm['name']})")
-    # Сравниваем затираемый буфер напрямую, без bytes(): иммутабельная
-    # копия открытого текста оставалась бы в heap до GC. Оба локальных
-    # буфера (открытый текст и шифротекст) затираем в finally.
-    decrypted = memoryview(plaintext)[: int(plaintext_len.value)]
+    plaintext = None
     try:
+        plaintext = (CK_BYTE * len(ciphertext))()
+        plaintext_len = CK_ULONG(len(plaintext))
+        rv = funcs["C_Decrypt"](
+            session,
+            ciphertext_buffer,
+            CK_ULONG(len(ciphertext)),
+            ctypes.cast(plaintext, CK_BYTE_PTR),
+            ctypes.byref(plaintext_len),
+        )
+        rv_ok(rv, f"C_Decrypt(data, {algorithm['name']})")
+        # Сравниваем буферы напрямую, не создавая bytes-копию открытого текста.
+        decrypted = memoryview(plaintext)[: int(plaintext_len.value)]
         if decrypted != expected_plaintext:
             raise PKCS11Error(f"Самопроверка расшифрования {algorithm['name']} не пройдена")
     finally:
-        ctypes.memset(plaintext, 0, len(plaintext))
+        if plaintext is not None:
+            ctypes.memset(plaintext, 0, len(plaintext))
         ctypes.memset(ciphertext_buffer, 0, len(ciphertext_buffer))
     return mechanism_keepalive
 
@@ -1170,8 +1178,7 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
     rv_ok(rv, "C_Verify(self-check)")
 
 
-# Worst-case ciphertext overhead for supported modes: prepended IV/nonce
-# (up to 16 bytes) plus padding or authentication tag (up to 16 bytes).
+# Initial output headroom; CKR_BUFFER_TOO_SMALL still resizes if a module needs more.
 MAX_CIPHERTEXT_OVERHEAD = 32
 
 
@@ -1206,33 +1213,34 @@ def encrypt_file(session, funcs, slot_id):
     key_handle = None
     last_params = b""
     last_ciphertext = b""
-    ciphertext_bytes = b""
+    retry_buffer = None
     self_check_passed = False
 
     try:
         setup_started = time.perf_counter()
         encrypted_buffer = (CK_BYTE * (file_size + MAX_CIPHERTEXT_OVERHEAD))()
         sensitive_buffers.append(encrypted_buffer)
-        encrypted_pointer = ctypes.cast(encrypted_buffer, CK_BYTE_PTR)
         key_handle = generate_secret_key(session, funcs, algorithm, mode_info)
         encryption_operations = [
-            prepare_encryption_operation(algorithm, build_encryption_params(algorithm), file_size)
+            prepare_encryption_operation(algorithm, build_encryption_params(algorithm), len(encrypted_buffer))
             for _ in range(warmup_count + count)
         ]
         setup_elapsed = time.perf_counter() - setup_started
 
         warmup_started = time.perf_counter()
         for operation in encryption_operations[:warmup_count]:
-            encrypt_with_generated_key(
+            _, _, output_buffer = encrypt_with_generated_key(
                 session,
                 funcs,
                 key_handle,
                 algorithm,
                 data_pointer,
                 data_size,
-                encrypted_pointer,
+                encrypted_buffer,
                 operation,
             )
+            if output_buffer is not encrypted_buffer:
+                ctypes.memset(output_buffer, 0, len(output_buffer))
         warmup_elapsed = time.perf_counter() - warmup_started
 
         operation_times = []
@@ -1241,20 +1249,23 @@ def encrypt_file(session, funcs, slot_id):
         if not measured_operations:
             raise PKCS11Error("Нет ни одной операции шифрования: количество и прогрев должны быть больше 0")
         for operation in measured_operations:
-            encrypted_len, operation_elapsed, ciphertext_bytes = encrypt_with_generated_key(
+            encrypted_len, operation_elapsed, output_buffer = encrypt_with_generated_key(
                 session,
                 funcs,
                 key_handle,
                 algorithm,
                 data_pointer,
                 data_size,
-                encrypted_pointer,
+                encrypted_buffer,
                 operation,
             )
+            if retry_buffer is not None:
+                ctypes.memset(retry_buffer, 0, len(retry_buffer))
+            retry_buffer = output_buffer if output_buffer is not encrypted_buffer else None
             operation_times.append(operation_elapsed)
         total_elapsed = time.perf_counter() - total_started
         last_params = measured_operations[-1]["params"]
-        last_ciphertext = ciphertext_bytes
+        last_ciphertext = bytes(output_buffer[:encrypted_len])
         decrypt_and_check(session, funcs, key_handle, algorithm, last_ciphertext, last_params, memoryview(data_buffer))
         self_check_passed = True
     finally:
@@ -1267,6 +1278,8 @@ def encrypt_file(session, funcs, slot_id):
         # оставляло бы открытый текст и шифротекст в памяти незатёртыми.
         for buffer in sensitive_buffers:
             ctypes.memset(buffer, 0, len(buffer))
+        if retry_buffer is not None:
+            ctypes.memset(retry_buffer, 0, len(retry_buffer))
         if cleanup_error is not None:
             if sys.exc_info()[0] is not None:
                 print(f"Предупреждение при очистке после исходной ошибки: {cleanup_error}", file=sys.stderr)
