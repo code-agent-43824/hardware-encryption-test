@@ -1166,16 +1166,25 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
     verify_mechanism = CK_MECHANISM(info["verify_mechanism"], None, CK_ULONG(0))
 
     signature = (CK_BYTE * len(signature_bytes)).from_buffer_copy(signature_bytes)
-    rv = funcs["C_VerifyInit"](session, ctypes.byref(verify_mechanism), public_key)
-    rv_ok(rv, "C_VerifyInit(self-check)")
-    rv = funcs["C_Verify"](
-        session,
-        verify_data,
-        CK_ULONG(verify_data_size),
-        signature,
-        CK_ULONG(len(signature_bytes)),
-    )
-    rv_ok(rv, "C_Verify(self-check)")
+    digest = None
+    try:
+        rv = funcs["C_VerifyInit"](session, ctypes.byref(verify_mechanism), public_key)
+        rv_ok(rv, "C_VerifyInit(self-check)")
+        rv = funcs["C_Verify"](
+            session,
+            verify_data,
+            CK_ULONG(verify_data_size),
+            signature,
+            CK_ULONG(len(signature_bytes)),
+        )
+        rv_ok(rv, "C_Verify(self-check)")
+    finally:
+        # Затираем дайджест открытого текста и копию подписи: как и в
+        # decrypt_and_check, временные чувствительные буферы не должны
+        # оставаться в heap до GC.
+        if digest is not None:
+            ctypes.memset(digest, 0, len(digest))
+        ctypes.memset(signature, 0, len(signature))
 
 
 # Initial output headroom; CKR_BUFFER_TOO_SMALL still resizes if a module needs more.
