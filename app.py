@@ -1146,28 +1146,29 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
         raise PKCS11Error(f"Неподдерживаемый тип ключа для проверки подписи: {pair_algorithm_name(algorithm)}")
     verify_data = data_buffer
     verify_data_size = data_size
-    digest_mechanism_type = info.get("digest_mechanism")
-    if digest_mechanism_type is not None:
-        digest_mechanism = CK_MECHANISM(digest_mechanism_type, None, CK_ULONG(0))
-        rv = funcs["C_DigestInit"](session, ctypes.byref(digest_mechanism))
-        rv_ok(rv, "C_DigestInit(self-check)")
-        digest = (CK_BYTE * info["digest_size"])()
-        digest_len = CK_ULONG(info["digest_size"])
-        rv = funcs["C_Digest"](
-            session,
-            data_buffer,
-            CK_ULONG(data_size),
-            ctypes.cast(digest, CK_BYTE_PTR),
-            ctypes.byref(digest_len),
-        )
-        rv_ok(rv, "C_Digest(self-check)")
-        verify_data = digest
-        verify_data_size = int(digest_len.value)
-    verify_mechanism = CK_MECHANISM(info["verify_mechanism"], None, CK_ULONG(0))
-
-    signature = (CK_BYTE * len(signature_bytes)).from_buffer_copy(signature_bytes)
+    signature = None
     digest = None
     try:
+        digest_mechanism_type = info.get("digest_mechanism")
+        if digest_mechanism_type is not None:
+            digest_mechanism = CK_MECHANISM(digest_mechanism_type, None, CK_ULONG(0))
+            rv = funcs["C_DigestInit"](session, ctypes.byref(digest_mechanism))
+            rv_ok(rv, "C_DigestInit(self-check)")
+            digest = (CK_BYTE * info["digest_size"])()
+            digest_len = CK_ULONG(info["digest_size"])
+            rv = funcs["C_Digest"](
+                session,
+                data_buffer,
+                CK_ULONG(data_size),
+                ctypes.cast(digest, CK_BYTE_PTR),
+                ctypes.byref(digest_len),
+            )
+            rv_ok(rv, "C_Digest(self-check)")
+            verify_data = digest
+            verify_data_size = int(digest_len.value)
+        verify_mechanism = CK_MECHANISM(info["verify_mechanism"], None, CK_ULONG(0))
+
+        signature = (CK_BYTE * len(signature_bytes)).from_buffer_copy(signature_bytes)
         rv = funcs["C_VerifyInit"](session, ctypes.byref(verify_mechanism), public_key)
         rv_ok(rv, "C_VerifyInit(self-check)")
         rv = funcs["C_Verify"](
@@ -1181,10 +1182,12 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
     finally:
         # Затираем дайджест открытого текста и копию подписи: как и в
         # decrypt_and_check, временные чувствительные буферы не должны
-        # оставаться в heap до GC.
+        # оставаться в heap до GC. Очистка охватывает и падения
+        # C_DigestInit/C_Digest: буферы создаются внутри try.
         if digest is not None:
             ctypes.memset(digest, 0, len(digest))
-        ctypes.memset(signature, 0, len(signature))
+        if signature is not None:
+            ctypes.memset(signature, 0, len(signature))
 
 
 # Initial output headroom; CKR_BUFFER_TOO_SMALL still resizes if a module needs more.
