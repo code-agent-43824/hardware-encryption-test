@@ -1675,6 +1675,10 @@ def initialize_pkcs11(funcs):
 
 
 def main():
+    if platform.system() == "Windows":
+        for stream in (sys.stdout, sys.stderr):
+            if stream is not None and not stream.isatty():
+                stream.reconfigure(encoding="utf-8")
     print(f"hardware-encryption-test {APP_VERSION}")
     default_path = default_library_path()
     raw_library_path = input(f"Путь к PKCS#11 библиотеке [Enter: {default_path}]: ").strip().strip('"')
