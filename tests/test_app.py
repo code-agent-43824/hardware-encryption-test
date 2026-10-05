@@ -70,6 +70,53 @@ class BenchmarkMetricTests(unittest.TestCase):
 
 
 class ReliabilityTests(unittest.TestCase):
+    def test_verify_signature_wipes_digest_and_signature_after_verification(self):
+        for verify_result in (app.CKR_OK, app.CKR_SIGNATURE_INVALID):
+            with self.subTest(verify_result=verify_result):
+                captured = {}
+
+                def digest(_session, _data, _size, output, _length):
+                    captured["digest"] = ctypes.cast(output, ctypes.POINTER(app.CK_BYTE * 32)).contents
+                    ctypes.memmove(output, b"D" * 32, 32)
+                    return app.CKR_OK
+
+                def verify(_session, digest_data, _digest_size, signature, _signature_size):
+                    self.assertEqual(bytes(ctypes.cast(digest_data, ctypes.POINTER(app.CK_BYTE * 32)).contents), b"D" * 32)
+                    captured["signature"] = ctypes.cast(signature, ctypes.POINTER(app.CK_BYTE * 3)).contents
+                    self.assertEqual(bytes(captured["signature"]), b"SIG")
+                    return verify_result
+
+                funcs = {
+                    "C_DigestInit": lambda *_args: app.CKR_OK,
+                    "C_Digest": digest,
+                    "C_VerifyInit": lambda *_args: app.CKR_OK,
+                    "C_Verify": verify,
+                }
+                data = (app.CK_BYTE * 4)(*b"data")
+                if verify_result == app.CKR_OK:
+                    app.verify_signature(1, funcs, {"algorithm": app.CKK_GOSTR3410, "public": 1}, data, 4, b"SIG")
+                else:
+                    with self.assertRaises(app.PKCS11Error):
+                        app.verify_signature(1, funcs, {"algorithm": app.CKK_GOSTR3410, "public": 1}, data, 4, b"SIG")
+                self.assertEqual(bytes(captured["digest"]), b"\0" * 32)
+                self.assertEqual(bytes(captured["signature"]), b"\0" * 3)
+
+    def test_verify_signature_wipes_partially_written_digest_on_error(self):
+        captured = {}
+
+        def fail_digest(_session, _data, _size, output, _length):
+            captured["digest"] = ctypes.cast(output, ctypes.POINTER(app.CK_BYTE * 32)).contents
+            ctypes.memmove(output, b"D" * 32, 32)
+            return 5
+
+        funcs = {"C_DigestInit": lambda *_args: app.CKR_OK, "C_Digest": fail_digest}
+        with self.assertRaises(app.PKCS11Error):
+            app.verify_signature(
+                1, funcs, {"algorithm": app.CKK_GOSTR3410, "public": 1},
+                (app.CK_BYTE * 4)(*b"data"), 4, b"SIG",
+            )
+        self.assertEqual(bytes(captured["digest"]), b"\0" * 32)
+
     def test_file_is_read_into_wipeable_buffer_without_read_bytes(self):
         class ReadIntoOnly(io.BytesIO):
             def read(self, *_args):
