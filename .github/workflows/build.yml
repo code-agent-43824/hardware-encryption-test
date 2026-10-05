@@ -1,5 +1,8 @@
 name: build
 
+permissions:
+  contents: read
+
 on:
   push:
     branches:
@@ -10,6 +13,22 @@ on:
   workflow_dispatch:
 
 jobs:
+  resolve-softhsm:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.latest.outputs.tag }}
+    steps:
+      - name: Resolve latest portable SoftHSM release
+        id: latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release view --repo code-agent-43824/SoftHSMv2 --json tagName --jq .tagName)
+          test -n "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "SoftHSM release: $tag"
+
   build:
     strategy:
       fail-fast: false
@@ -70,3 +89,59 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: artifact/
+
+  fake-rutoken-e2e:
+    needs: [build, resolve-softhsm]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python_arch: x64
+            artifact_name: hardware-encryption-test-linux-x64
+            binary_name: hardware-encryption-test
+            softhsm_asset: softhsm-portable-linux-x64.zip
+          - os: macos-latest
+            python_arch: x64
+            artifact_name: hardware-encryption-test-macos
+            binary_name: hardware-encryption-test
+            softhsm_asset: softhsm-portable-macos-universal.zip
+          - os: windows-latest
+            python_arch: x64
+            artifact_name: hardware-encryption-test-windows-x64
+            binary_name: hardware-encryption-test.exe
+            softhsm_asset: softhsm-portable-windows-x64.zip
+          - os: windows-11-arm
+            python_arch: arm64
+            artifact_name: hardware-encryption-test-windows-arm64
+            binary_name: hardware-encryption-test.exe
+            softhsm_asset: softhsm-portable-windows-arm64.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.python_arch }}
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: artifact
+
+      - name: Download portable SoftHSM and checksums
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOFTHSM_TAG: ${{ needs.resolve-softhsm.outputs.tag }}
+        run: |
+          gh release download "$SOFTHSM_TAG" --repo code-agent-43824/SoftHSMv2 \
+            --pattern '${{ matrix.softhsm_asset }}' --pattern SHA256SUMS --dir softhsm-release
+
+      - name: Run compiled app against fake Rutoken
+        run: >-
+          python tests/e2e_fake_rutoken.py
+          --app artifact/${{ matrix.binary_name }}
+          --softhsm-zip softhsm-release/${{ matrix.softhsm_asset }}
+          --checksums softhsm-release/SHA256SUMS

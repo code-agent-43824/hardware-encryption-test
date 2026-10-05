@@ -806,7 +806,8 @@ def close_session(funcs, session):
 
 
 def login(funcs, session):
-    pin = getpass.getpass(f"PIN токена [Enter: {DEFAULT_PIN}]: ")
+    prompt = f"PIN токена [Enter: {DEFAULT_PIN}]: "
+    pin = getpass.getpass(prompt) if sys.stdin.isatty() else input(prompt)
     used_default_pin = False
     if pin == "":
         pin = DEFAULT_PIN

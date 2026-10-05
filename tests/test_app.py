@@ -267,7 +267,7 @@ class ReliabilityTests(unittest.TestCase):
 
     def test_blank_pin_uses_documented_demo_pin(self):
         login_call = mock.Mock(return_value=app.CKR_OK)
-        with mock.patch.object(app.getpass, "getpass", return_value=""):
+        with mock.patch("sys.stdin", mock.Mock(isatty=lambda: True)), mock.patch.object(app.getpass, "getpass", return_value=""):
             self.assertTrue(app.login({"C_Login": login_call}, 1))
         login_call.assert_called_once()
         session, user_type, pin, pin_length = login_call.call_args.args
@@ -275,6 +275,16 @@ class ReliabilityTests(unittest.TestCase):
         self.assertEqual(app.native_int(user_type), app.CKU_USER)
         self.assertEqual(pin, app.DEFAULT_PIN.encode("utf-8"))
         self.assertEqual(app.native_int(pin_length), len(app.DEFAULT_PIN))
+
+    def test_noninteractive_pin_uses_standard_input(self):
+        login_call = mock.Mock(return_value=app.CKR_OK)
+        with (
+            mock.patch("sys.stdin", io.StringIO("\n")),
+            mock.patch.object(app.getpass, "getpass", side_effect=AssertionError("console read")),
+            mock.patch("sys.stdout", io.StringIO()),
+        ):
+            self.assertTrue(app.login({"C_Login": login_call}, 1))
+        self.assertEqual(login_call.call_args.args[2], app.DEFAULT_PIN.encode("utf-8"))
 
     def test_stale_application_temp_keys_are_removed(self):
         destroy = mock.Mock(return_value=app.CKR_OK)
