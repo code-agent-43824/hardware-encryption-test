@@ -1061,7 +1061,10 @@ def sign_once(session, funcs, private_key, mechanism, data_pointer, data_size, s
         ctypes.byref(output_length),
     )
     rv_ok(rv, "C_Sign(data)")
-    return time.perf_counter() - started
+    # По PKCS#11 C_Sign записывает в output_length фактическую длину подписи:
+    # возвращаем её, чтобы вызывающий код не печатал и не проверял мусорный
+    # хвост буфера, если модуль вернул длину меньше выделенной ёмкости.
+    return time.perf_counter() - started, int(output_length.value)
 
 
 def calculate_benchmark_metrics(data_size, count, operation_times, total_elapsed):
@@ -1412,8 +1415,9 @@ def sign_file(session, funcs):
         operation_times = []
         measured_output_lengths = output_lengths[warmup_count:]
         total_started = time.perf_counter()
+        last_signature_length = 0
         for output_length in measured_output_lengths:
-            operation_elapsed = sign_once(
+            operation_elapsed, signature_length = sign_once(
                 session,
                 funcs,
                 private_key,
@@ -1424,9 +1428,9 @@ def sign_file(session, funcs):
                 output_length,
             )
             operation_times.append(operation_elapsed)
+            last_signature_length = signature_length
 
         total_elapsed = time.perf_counter() - total_started
-        last_signature_length = int(measured_output_lengths[-1].value)
         last_signature_bytes = bytes(signature[:last_signature_length])
         metrics = calculate_benchmark_metrics(file_size, count, operation_times, total_elapsed)
         signature_base64 = base64.b64encode(last_signature_bytes).decode("ascii") if last_signature_bytes else ""
