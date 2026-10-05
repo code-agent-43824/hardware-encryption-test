@@ -109,6 +109,8 @@ def main():
         )
         env = os.environ.copy()
         env["SOFTHSM2_CONF"] = str(config)
+        # Windows CI pipes otherwise select cp1252, which cannot print Russian prompts.
+        env["PYTHONIOENCODING"] = "utf-8"
         run([str(util), "--init-token", "--slot", "0", "--label", "ci-token",
              "--so-pin", DEMO_PIN, "--pin", DEMO_PIN], env=env)
         output = run([str(app)], env=env, input_text=input_sequence(module), timeout=300)
