@@ -1314,7 +1314,7 @@ def encrypt_file(session, funcs, slot_id):
     else:
         print("Параметры последнего шифрования: не используются")
     print(f"Файл: {file_path}")
-    print(f"Размер исходных данных: {file_path.stat().st_size} байт")
+    print(f"Размер исходных данных: {file_size} байт")
     print(f"Количество шифрований: {count}")
     print_benchmark_metrics(
         metrics,
