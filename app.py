@@ -1060,11 +1060,33 @@ def sign_once(session, funcs, private_key, mechanism, data_pointer, data_size, s
         signature_pointer,
         ctypes.byref(output_length),
     )
+    if rv == CKR_BUFFER_TOO_SMALL:
+        # По PKCS#11 после CKR_BUFFER_TOO_SMALL токен сообщает нужный размер,
+        # операция остаётся инициализированной — повторяем C_Sign с буфером
+        # нужного размера. Как и в encrypt_with_generated_key, временный
+        # буфер затирается при ошибке повторного вызова.
+        needed = int(output_length.value)
+        retry_buffer = (CK_BYTE * needed)()
+        try:
+            rv = funcs["C_Sign"](
+                session,
+                data_pointer,
+                data_size,
+                ctypes.cast(retry_buffer, CK_BYTE_PTR),
+                ctypes.byref(output_length),
+            )
+            rv_ok(rv, "C_Sign(data, retry)")
+        except BaseException:
+            ctypes.memset(retry_buffer, 0, len(retry_buffer))
+            raise
+        return time.perf_counter() - started, int(output_length.value), retry_buffer
     rv_ok(rv, "C_Sign(data)")
     # По PKCS#11 C_Sign записывает в output_length фактическую длину подписи:
     # возвращаем её, чтобы вызывающий код не печатал и не проверял мусорный
     # хвост буфера, если модуль вернул длину меньше выделенной ёмкости.
-    return time.perf_counter() - started, int(output_length.value)
+    # Третий элемент — retry-буфер при CKR_BUFFER_TOO_SMALL (None, если повтора
+    # не было): вызывающий код обязан затереть его и использовать для подписи.
+    return time.perf_counter() - started, int(output_length.value), None
 
 
 def calculate_benchmark_metrics(data_size, count, operation_times, total_elapsed):
@@ -1400,7 +1422,7 @@ def sign_file(session, funcs):
 
         warmup_started = time.perf_counter()
         for output_length in output_lengths[:warmup_count]:
-            sign_once(
+            _, _, retry_buffer = sign_once(
                 session,
                 funcs,
                 private_key,
@@ -1410,14 +1432,18 @@ def sign_file(session, funcs):
                 signature_pointer,
                 output_length,
             )
+            if retry_buffer is not None:
+                # Подпись из прогрева не используется, буфер сразу затираем.
+                ctypes.memset(retry_buffer, 0, len(retry_buffer))
         warmup_elapsed = time.perf_counter() - warmup_started
 
         operation_times = []
         measured_output_lengths = output_lengths[warmup_count:]
         total_started = time.perf_counter()
         last_signature_length = 0
+        last_signature_source = signature
         for output_length in measured_output_lengths:
-            operation_elapsed, signature_length = sign_once(
+            operation_elapsed, signature_length, retry_buffer = sign_once(
                 session,
                 funcs,
                 private_key,
@@ -1427,11 +1453,18 @@ def sign_file(session, funcs):
                 signature_pointer,
                 output_length,
             )
+            if retry_buffer is not None and last_signature_source is not signature:
+                ctypes.memset(last_signature_source, 0, len(last_signature_source))
+            if retry_buffer is not None:
+                # Подпись записана в retry-буфер: добавляем его в затирание в
+                # finally и читаем результат именно из него.
+                sensitive_buffers.append(retry_buffer)
+                last_signature_source = retry_buffer
             operation_times.append(operation_elapsed)
             last_signature_length = signature_length
 
         total_elapsed = time.perf_counter() - total_started
-        last_signature_bytes = bytes(signature[:last_signature_length])
+        last_signature_bytes = bytes(last_signature_source[:last_signature_length])
         metrics = calculate_benchmark_metrics(file_size, count, operation_times, total_elapsed)
         signature_base64 = base64.b64encode(last_signature_bytes).decode("ascii") if last_signature_bytes else ""
         try:

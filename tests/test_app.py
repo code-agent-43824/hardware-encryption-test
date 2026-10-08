@@ -197,6 +197,78 @@ class ReliabilityTests(unittest.TestCase):
             )
         self.assertEqual(bytes(captured["output"]), b"\0" * 6)
 
+    def test_sign_retry_returns_wipeable_buffer(self):
+        data = b"abc"
+        source = (app.CK_BYTE * len(data)).from_buffer_copy(data)
+        signature_buffer = (app.CK_BYTE * 5)()
+        calls = []
+
+        def sign(_session, _data, _size, output, output_length):
+            calls.append(1)
+            length = ctypes.cast(output_length, ctypes.POINTER(app.CK_ULONG))
+            if len(calls) == 1:
+                length[0] = 5
+                return app.CKR_BUFFER_TOO_SMALL
+            ctypes.memmove(output, b"SIGN1", 5)
+            length[0] = 5
+            return app.CKR_OK
+
+        funcs = {"C_SignInit": lambda *_args: app.CKR_OK, "C_Sign": sign}
+        elapsed, signature_length, retry_buffer = app.sign_once(
+            1, funcs, 1, app.CK_MECHANISM(1), ctypes.cast(source, app.CK_BYTE_PTR),
+            app.CK_ULONG(3), ctypes.cast(signature_buffer, app.CK_BYTE_PTR),
+            app.CK_ULONG(3),
+        )
+        self.assertEqual(signature_length, 5)
+        self.assertEqual(len(calls), 2)
+        self.assertIsNotNone(retry_buffer)
+        self.assertIsInstance(retry_buffer, ctypes.Array)
+        self.assertEqual(bytes(retry_buffer), b"SIGN1")
+        self.assertGreater(elapsed, 0)
+
+    def test_sign_retry_failure_wipes_temporary_output(self):
+        captured = {}
+        calls = []
+
+        def sign(_session, _data, _size, output, output_length):
+            calls.append(1)
+            length = ctypes.cast(output_length, ctypes.POINTER(app.CK_ULONG))
+            if len(calls) == 1:
+                length[0] = 6
+                return app.CKR_BUFFER_TOO_SMALL
+            captured["output"] = ctypes.cast(output, ctypes.POINTER(app.CK_BYTE * 6)).contents
+            ctypes.memmove(output, b"SECRET", 6)
+            return 5
+
+        funcs = {"C_SignInit": lambda *_args: app.CKR_OK, "C_Sign": sign}
+        with self.assertRaises(app.PKCS11Error):
+            app.sign_once(
+                1, funcs, 1, app.CK_MECHANISM(1), ctypes.cast((app.CK_BYTE * 3)(), app.CK_BYTE_PTR),
+                app.CK_ULONG(3), ctypes.cast((app.CK_BYTE * 3)(), app.CK_BYTE_PTR),
+                app.CK_ULONG(3),
+            )
+        self.assertEqual(bytes(captured["output"]), b"\0" * 6)
+
+    def test_sign_without_retry_returns_none_retry_buffer(self):
+        data = b"abc"
+        source = (app.CK_BYTE * len(data)).from_buffer_copy(data)
+        signature_buffer = (app.CK_BYTE * 5)()
+
+        def sign(_session, _data, _size, output, output_length):
+            length = ctypes.cast(output_length, ctypes.POINTER(app.CK_ULONG))
+            ctypes.memmove(output, b"SIGN!", 5)
+            length[0] = 5
+            return app.CKR_OK
+
+        funcs = {"C_SignInit": lambda *_args: app.CKR_OK, "C_Sign": sign}
+        _, signature_length, retry_buffer = app.sign_once(
+            1, funcs, 1, app.CK_MECHANISM(1), ctypes.cast(source, app.CK_BYTE_PTR),
+            app.CK_ULONG(3), ctypes.cast(signature_buffer, app.CK_BYTE_PTR),
+            app.CK_ULONG(5),
+        )
+        self.assertEqual(signature_length, 5)
+        self.assertIsNone(retry_buffer)
+
     def test_macos_default_library_uses_installed_system_path(self):
         with mock.patch.object(app.platform, "system", return_value="Darwin"):
             self.assertEqual(app.default_library_path(), Path("/usr/local/lib/librtpkcs11ecp.dylib"))
