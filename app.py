@@ -1219,6 +1219,9 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
 # Initial output headroom; CKR_BUFFER_TOO_SMALL still resizes if a module needs more.
 MAX_CIPHERTEXT_OVERHEAD = 32
 
+# Сколько байт последнего шифротекста читается для Base64-превью (256 символов base64 = 192 байта).
+PREVIEW_CIPHERTEXT_BYTES = 192
+
 
 def encrypt_file(session, funcs, slot_id):
     raw_path = input("Что зашифровать? ").strip().strip('"')
@@ -1250,7 +1253,7 @@ def encrypt_file(session, funcs, slot_id):
     data_size = CK_ULONG(file_size)
     key_handle = None
     last_params = b""
-    last_ciphertext = b""
+    last_output = None
     retry_buffer = None
     self_check_passed = False
 
@@ -1303,8 +1306,19 @@ def encrypt_file(session, funcs, slot_id):
             operation_times.append(operation_elapsed)
         total_elapsed = time.perf_counter() - total_started
         last_params = measured_operations[-1]["params"]
-        last_ciphertext = bytes(output_buffer[:encrypted_len])
-        decrypt_and_check(session, funcs, key_handle, algorithm, last_ciphertext, last_params, memoryview(data_buffer))
+        # Храним ссылку на затираемый буфер вместо bytes-копии шифротекста:
+        # bytes в heap нельзя обнулить, а полная копия нужна только для
+        # самопроверки, которая сравнивает буферы напрямую.
+        last_output = (output_buffer, encrypted_len)
+        decrypt_and_check(
+            session,
+            funcs,
+            key_handle,
+            algorithm,
+            memoryview(output_buffer)[:encrypted_len],
+            last_params,
+            memoryview(data_buffer),
+        )
         self_check_passed = True
     finally:
         cleanup_error = None
@@ -1325,6 +1339,7 @@ def encrypt_file(session, funcs, slot_id):
                 raise cleanup_error
 
     metrics = calculate_benchmark_metrics(file_size, count, operation_times, total_elapsed)
+    last_output_buffer, last_output_length = last_output
     print(f"Режим шифрования: {mode_info['name']}")
     print(f"Алгоритм шифрования: {algorithm['name']}")
     print(f"Секретный ключ создан через C_GenerateKey: CKA_TOKEN={'TRUE' if mode_info['cka_token'] else 'FALSE'}")
@@ -1345,9 +1360,10 @@ def encrypt_file(session, funcs, slot_id):
         setup_elapsed,
         "ключ, параметры механизмов и буферы",
     )
-    print(f"Размер последнего шифротекста: {len(last_ciphertext)} байт")
+    print(f"Размер последнего шифротекста: {last_output_length} байт")
+    preview_bytes = bytes(memoryview(last_output_buffer)[: min(last_output_length, PREVIEW_CIPHERTEXT_BYTES)])
     print("Последний шифротекст (Base64, первые 256 символов):")
-    print(base64.b64encode(last_ciphertext).decode("ascii")[:256])
+    print(base64.b64encode(preview_bytes).decode("ascii")[:256])
 
 
 def delete_pair(session, funcs):
