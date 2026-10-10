@@ -1310,6 +1310,12 @@ def encrypt_file(session, funcs, slot_id):
         # bytes в heap нельзя обнулить, а полная копия нужна только для
         # самопроверки, которая сравнивает буферы напрямую.
         last_output = (output_buffer, encrypted_len)
+        # Копия для Base64-превью создаётся внутри try, до finally:
+        # finally затирает sensitive_buffers, и превью после блока
+        # печатало бы байты уже очищенного буфера (нули).
+        last_output_preview = bytes(
+            memoryview(output_buffer)[: min(encrypted_len, PREVIEW_CIPHERTEXT_BYTES)]
+        )
         decrypt_and_check(
             session,
             funcs,
@@ -1361,9 +1367,8 @@ def encrypt_file(session, funcs, slot_id):
         "ключ, параметры механизмов и буферы",
     )
     print(f"Размер последнего шифротекста: {last_output_length} байт")
-    preview_bytes = bytes(memoryview(last_output_buffer)[: min(last_output_length, PREVIEW_CIPHERTEXT_BYTES)])
     print("Последний шифротекст (Base64, первые 256 символов):")
-    print(base64.b64encode(preview_bytes).decode("ascii")[:256])
+    print(base64.b64encode(last_output_preview).decode("ascii")[:256])
 
 
 def delete_pair(session, funcs):
