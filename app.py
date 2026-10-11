@@ -1384,11 +1384,19 @@ def delete_pair(session, funcs):
     if confirm not in {"y", "yes", "д", "да"}:
         print("Удаление отменено")
         return
+    errors = []
     for key in ("public", "private"):
         handle = pair.get(key)
         if handle:
             rv = funcs["C_DestroyObject"](session, handle)
-            rv_ok(rv, "C_DestroyObject")
+            if rv != CKR_OK:
+                errors.append((key, rv))
+    # Пытаемся удалить оба ключа даже при ошибке первого: иначе осиротевший
+    # приватный ключ оставался бы на токене без открытой части и его нельзя
+    # было бы ни найти по открытому ключу, ни корректно удалить повторно.
+    if errors:
+        detail = "; ".join(f"{name}: {rv:#x}" for name, rv in errors)
+        raise PKCS11Error(f"Не удалось удалить ключи пары ({detail})")
     print_pair("Пара удалена", pair)
 
 
