@@ -1499,9 +1499,20 @@ def sign_file(session, funcs):
             last_signature_length = signature_length
 
         total_elapsed = time.perf_counter() - total_started
-        last_signature_bytes = bytes(last_signature_source[:last_signature_length])
+        # Копия подписи нужна для самопроверки и Base64-вывода. Как и в
+        # encrypt_file, единственная неизбежная копия создаётся в затираемый
+        # ctypes-буфер и попадает в sensitive_buffers: bytes-копия в heap
+        # осталась бы незатёртой до GC (та же проблема, что уже исправлена
+        # для шифротекста).
+        last_signature_bytes = (CK_BYTE * last_signature_length)()
+        sensitive_buffers.append(last_signature_bytes)
+        ctypes.memmove(last_signature_bytes, last_signature_source, last_signature_length)
         metrics = calculate_benchmark_metrics(file_size, count, operation_times, total_elapsed)
-        signature_base64 = base64.b64encode(last_signature_bytes).decode("ascii") if last_signature_bytes else ""
+        signature_base64 = (
+            base64.b64encode(bytes(memoryview(last_signature_bytes))).decode("ascii")
+            if last_signature_length
+            else ""
+        )
         try:
             verify_signature(session, funcs, pair, data_buffer, file_size, last_signature_bytes)
         except PKCS11Error as error:
