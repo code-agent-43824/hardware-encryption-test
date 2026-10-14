@@ -1226,8 +1226,8 @@ PREVIEW_CIPHERTEXT_BYTES = 192
 def encrypt_file(session, funcs, slot_id):
     raw_path = input("Что зашифровать? ").strip().strip('"')
     file_path = resolve_sample_file_path(raw_path)
-    if not file_path.exists():
-        print(f"Файл не найден: {file_path}")
+    if not file_path.is_file():
+        print(f"Файл не найден или это не обычный файл: {file_path}")
         return
 
     count = prompt_operation_count("зашифровать")
@@ -1247,7 +1247,11 @@ def encrypt_file(session, funcs, slot_id):
     # Читаем файл сразу в затираемый ctypes-буфер: обычный bytes нельзя
     # обнулить, и открытый текст оставался бы в heap до GC.
     sensitive_buffers = []
-    data_buffer, file_size = read_file_into_wipeable_buffer(file_path)
+    try:
+        data_buffer, file_size = read_file_into_wipeable_buffer(file_path)
+    except OSError as error:
+        print(f"Не удалось прочитать файл: {error}")
+        return
     sensitive_buffers.append(data_buffer)
     data_pointer = ctypes.cast(data_buffer, CK_BYTE_PTR)
     data_size = CK_ULONG(file_size)
@@ -1412,8 +1416,8 @@ def find_pair_menu(session, funcs):
 def sign_file(session, funcs):
     raw_path = input("Что подписать? ").strip().strip('"')
     file_path = resolve_sample_file_path(raw_path)
-    if not file_path.exists():
-        print(f"Файл не найден: {file_path}")
+    if not file_path.is_file():
+        print(f"Файл не найден или это не обычный файл: {file_path}")
         return
     count = prompt_operation_count("подписать")
     warmup_count = prompt_warmup_count()
@@ -1435,7 +1439,11 @@ def sign_file(session, funcs):
     # Читаем файл сразу в затираемый ctypes-буфер: обычные bytes нельзя
     # обнулить, и открытый текст оставался бы в heap до GC.
     sensitive_buffers = []
-    data_buffer, file_size = read_file_into_wipeable_buffer(file_path)
+    try:
+        data_buffer, file_size = read_file_into_wipeable_buffer(file_path)
+    except OSError as error:
+        print(f"Не удалось прочитать файл: {error}")
+        return
     sensitive_buffers.append(data_buffer)
     try:
         setup_started = time.perf_counter()
