@@ -1476,6 +1476,8 @@ def sign_file(session, funcs):
 
         operation_times = []
         measured_output_lengths = output_lengths[warmup_count:]
+        if not measured_output_lengths:
+            raise PKCS11Error("Нет ни одной операции подписания: количество и прогрев должны быть больше 0")
         total_started = time.perf_counter()
         last_signature_length = 0
         last_signature_source = signature
