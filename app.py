@@ -1194,22 +1194,33 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
             verify_data_size = int(digest_len.value)
         verify_mechanism = CK_MECHANISM(info["verify_mechanism"], None, CK_ULONG(0))
 
-        signature = (CK_BYTE * len(signature_bytes)).from_buffer_copy(signature_bytes)
+        if isinstance(signature_bytes, ctypes.Array) and ctypes.sizeof(signature_bytes._type_) == 1:
+            # Подпись уже лежит в затираемом ctypes-буфере вызывающего кода
+            # (sign_file передаёт last_signature_bytes): проверяем на месте,
+            # без второй копии в heap. Исходный буфер не затираем — он
+            # принадлежит вызывающему коду и очищается в его finally.
+            signature = None
+            verify_buffer = signature_bytes
+        else:
+            signature = (CK_BYTE * len(signature_bytes)).from_buffer_copy(signature_bytes)
+            verify_buffer = signature
         rv = funcs["C_VerifyInit"](session, ctypes.byref(verify_mechanism), public_key)
         rv_ok(rv, "C_VerifyInit(self-check)")
         rv = funcs["C_Verify"](
             session,
             verify_data,
             CK_ULONG(verify_data_size),
-            signature,
+            verify_buffer,
             CK_ULONG(len(signature_bytes)),
         )
         rv_ok(rv, "C_Verify(self-check)")
     finally:
-        # Затираем дайджест открытого текста и копию подписи: как и в
-        # decrypt_and_check, временные чувствительные буферы не должны
-        # оставаться в heap до GC. Очистка охватывает и падения
-        # C_DigestInit/C_Digest: буферы создаются внутри try.
+        # Затираем дайджест открытого текста и копию подписи (если она
+        # создавалась): как и в decrypt_and_check, временные чувствительные
+        # буферы не должны оставаться в heap до GC. Очистка охватывает и
+        # падения C_DigestInit/C_Digest: буферы создаются внутри try.
+        # При проверке на месте копии нет: исходный буфер принадлежит
+        # вызывающему коду и затирается в его finally.
         if digest is not None:
             ctypes.memset(digest, 0, len(digest))
         if signature is not None:
