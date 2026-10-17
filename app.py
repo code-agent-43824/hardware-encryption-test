@@ -1529,8 +1529,11 @@ def sign_file(session, funcs):
         sensitive_buffers.append(last_signature_bytes)
         ctypes.memmove(last_signature_bytes, last_signature_source, last_signature_length)
         metrics = calculate_benchmark_metrics(file_size, count, operation_times, total_elapsed)
+        # В b64encode передаём затираемый буфер напрямую (ctypes-массивы
+        # поддерживают buffer-протокол): явная bytes(...)-обёртка создавала бы
+        # вторую полную незатираемую копию подписи в heap.
         signature_base64 = (
-            base64.b64encode(bytes(memoryview(last_signature_bytes))).decode("ascii")
+            base64.b64encode(last_signature_bytes).decode("ascii")
             if last_signature_length
             else ""
         )
