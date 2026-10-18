@@ -1260,7 +1260,7 @@ def encrypt_file(session, funcs, slot_id):
     sensitive_buffers = []
     try:
         data_buffer, file_size = read_file_into_wipeable_buffer(file_path)
-    except OSError as error:
+    except (OSError, PKCS11Error) as error:
         print(f"Не удалось прочитать файл: {error}")
         return
     sensitive_buffers.append(data_buffer)
@@ -1452,7 +1452,7 @@ def sign_file(session, funcs):
     sensitive_buffers = []
     try:
         data_buffer, file_size = read_file_into_wipeable_buffer(file_path)
-    except OSError as error:
+    except (OSError, PKCS11Error) as error:
         print(f"Не удалось прочитать файл: {error}")
         return
     sensitive_buffers.append(data_buffer)
