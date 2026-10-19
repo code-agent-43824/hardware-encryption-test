@@ -1331,15 +1331,22 @@ def encrypt_file(session, funcs, slot_id):
         last_output_preview = bytes(
             memoryview(output_buffer)[: min(encrypted_len, PREVIEW_CIPHERTEXT_BYTES)]
         )
-        decrypt_and_check(
-            session,
-            funcs,
-            key_handle,
-            algorithm,
-            memoryview(output_buffer)[:encrypted_len],
-            last_params,
-            memoryview(data_buffer),
-        )
+        try:
+            decrypt_and_check(
+                session,
+                funcs,
+                key_handle,
+                algorithm,
+                memoryview(output_buffer)[:encrypted_len],
+                last_params,
+                memoryview(data_buffer),
+            )
+        except PKCS11Error as error:
+            # Провал самопроверки — сигнал о неисправности токена или модуля:
+            # сообщаем явно в stderr (как в sign_file) и пробрасываем ошибку
+            # дальше, чтобы процесс завершился с ненулевым кодом.
+            print(f"Самопроверка расшифрования: НЕ УСПЕШНО ({error})", file=sys.stderr)
+            raise
         self_check_passed = True
     finally:
         cleanup_error = None
