@@ -115,6 +115,15 @@ class PKCS11Error(Exception):
             super().__init__(f"{message}: 0x{rv:08X}")
 
 
+class SelfCheckError(PKCS11Error):
+    """Провал самопроверки (подписи или расшифрования).
+
+    Означает, что токен или модуль вернул неверный результат: это признак
+    неисправности либо подмены модуля. Не должен проглатываться интерактивным
+    меню — исключение доходит до main, и процесс завершается с ненулевым кодом.
+    """
+
+
 class CK_VERSION(ctypes.Structure):
     if PACK:
         _pack_ = PACK
@@ -1346,7 +1355,7 @@ def encrypt_file(session, funcs, slot_id):
             # сообщаем явно в stderr (как в sign_file) и пробрасываем ошибку
             # дальше, чтобы процесс завершился с ненулевым кодом.
             print(f"Самопроверка расшифрования: НЕ УСПЕШНО ({error})", file=sys.stderr)
-            raise
+            raise SelfCheckError(f"Самопроверка расшифрования не пройдена: {error}") from error
         self_check_passed = True
     finally:
         cleanup_error = None
@@ -1551,7 +1560,7 @@ def sign_file(session, funcs):
                 print("Самопроверка подписи: НЕ УСПЕШНО — подпись не прошла проверку", file=sys.stderr)
             else:
                 print(f"Самопроверка подписи не выполнена: {error}", file=sys.stderr)
-            raise
+            raise SelfCheckError(f"Самопроверка подписи не выполнена: {error}") from error
 
         print_pair("Подпись выполнена ключом", pair)
         print(f"Алгоритм подписи: {pair_algorithm_name(pair.get('algorithm'))}")
@@ -1763,6 +1772,10 @@ def run_menu(funcs, slot_id):
             continue
         try:
             action()
+        except SelfCheckError:
+            # Провал самопроверки не проглатывается меню: исключение доходит
+            # до main, которая печатает ошибку и возвращает код 1.
+            raise
         except PKCS11Error as error:
             print(f"Ошибка: {error}")
         except Exception as error:
