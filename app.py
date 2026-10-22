@@ -6,6 +6,7 @@ import secrets
 import sys
 import textwrap
 import time
+import traceback
 from pathlib import Path
 
 
@@ -1779,6 +1780,11 @@ def run_menu(funcs, slot_id):
         except PKCS11Error as error:
             print(f"Ошибка: {error}")
         except Exception as error:
+            # Неожиданное исключение — признак бага в самом инструменте:
+            # без стека такие дефекты недиагностируемы (история: смещённый
+            # try/finally, неверная ёмкость буфера). Печатаем стек в stderr,
+            # сохраняя прежнее сообщение и продолжение работы меню.
+            traceback.print_exc()
             print(f"Неожиданная ошибка: {error}")
 
 
