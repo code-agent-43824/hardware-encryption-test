@@ -1278,9 +1278,8 @@ def encrypt_file(session, funcs, slot_id):
     data_size = CK_ULONG(file_size)
     key_handle = None
     last_params = b""
-    last_output = None
+    last_output_length = 0
     retry_buffer = None
-    self_check_passed = False
 
     try:
         setup_started = time.perf_counter()
@@ -1331,10 +1330,11 @@ def encrypt_file(session, funcs, slot_id):
             operation_times.append(operation_elapsed)
         total_elapsed = time.perf_counter() - total_started
         last_params = measured_operations[-1]["params"]
-        # Храним ссылку на затираемый буфер вместо bytes-копии шифротекста:
-        # bytes в heap нельзя обнулить, а полная копия нужна только для
-        # самопроверки, которая сравнивает буферы напрямую.
-        last_output = (output_buffer, encrypted_len)
+        # Самопроверка ниже сравнивает буферы напрямую, без bytes-копии
+        # шифротекста. После затирания буферов в finally живая ссылка на
+        # буфер не нужна: сохраняем только длину, чтобы после очистки не
+        # оставалось указателя на затёртую память.
+        last_output_length = encrypted_len
         # Копия для Base64-превью создаётся внутри try, до finally:
         # finally затирает sensitive_buffers, и превью после блока
         # печатало бы байты уже очищенного буфера (нули).
@@ -1357,7 +1357,6 @@ def encrypt_file(session, funcs, slot_id):
             # дальше, чтобы процесс завершился с ненулевым кодом.
             print(f"Самопроверка расшифрования: НЕ УСПЕШНО ({error})", file=sys.stderr)
             raise SelfCheckError(f"Самопроверка расшифрования не пройдена: {error}") from error
-        self_check_passed = True
     finally:
         cleanup_error = None
         if key_handle:
@@ -1377,13 +1376,12 @@ def encrypt_file(session, funcs, slot_id):
                 raise cleanup_error
 
     metrics = calculate_benchmark_metrics(file_size, count, operation_times, total_elapsed)
-    last_output_buffer, last_output_length = last_output
     print(f"Режим шифрования: {mode_info['name']}")
     print(f"Алгоритм шифрования: {algorithm['name']}")
     print(f"Секретный ключ создан через C_GenerateKey: CKA_TOKEN={'TRUE' if mode_info['cka_token'] else 'FALSE'}")
     print(f"Механизм генерации ключа: 0x{algorithm['key_gen_mechanism']:08X}")
     print(f"Механизм шифрования: 0x{algorithm['encrypt_mechanism']:08X}")
-    print(f"Самопроверка расшифрованием: {'успешно' if self_check_passed else 'не пройдена'}")
+    print("Самопроверка расшифрованием: успешно")
     if last_params:
         print(f"Параметры последнего шифрования: {last_params.hex().upper()}")
     else:
