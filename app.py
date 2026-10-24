@@ -1187,7 +1187,15 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
     try:
         digest_mechanism_type = info.get("digest_mechanism")
         if digest_mechanism_type is not None:
-            digest_mechanism = CK_MECHANISM(digest_mechanism_type, None, CK_ULONG(0))
+            # OID параметров хеша обязателен для GOST-механизмов на Rutoken ECP:
+            # передаём тот же OID, что и в объединённом механизме подписи
+            # (signing_mechanism_for_pair использует info["sign_params"]).
+            # Без параметра C_DigestInit на модуле, проверяющем параметр
+            # механизма, падает — и самопроверка корректной ГОСТ-подписи
+            # не выполняется.
+            digest_mechanism, digest_params_keepalive = mechanism_with_optional_param(
+                digest_mechanism_type, info.get("sign_params"),
+            )
             rv = funcs["C_DigestInit"](session, ctypes.byref(digest_mechanism))
             rv_ok(rv, "C_DigestInit(self-check)")
             digest = (CK_BYTE * info["digest_size"])()
