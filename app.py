@@ -1526,6 +1526,20 @@ def sign_file(session, funcs):
                 signature_pointer,
                 output_length,
             )
+            if retry_buffer is not None:
+                # Retry-буфер добавляем в затирание до любых проверок: при
+                # ошибке ниже finally обязан его затереть.
+                sensitive_buffers.append(retry_buffer)
+            # ulSignatureLen возвращает недоверенный модуль: при сбое или
+            # подмене он может сообщить длину больше ёмкости буфера. Тогда
+            # memmove копии подписи и C_Verify читали бы за границей буфера
+            # подписи, поэтому длину проверяем до любого использования.
+            signature_capacity = len(retry_buffer) if retry_buffer is not None else len(signature)
+            if signature_length > signature_capacity:
+                raise PKCS11Error(
+                    f"Модуль вернул некорректную длину подписи: "
+                    f"{signature_length} > ёмкости буфера {signature_capacity}"
+                )
             # Результат каждой измеряемой операции заменяет предыдущий:
             # иначе после итерации с retry (CKR_BUFFER_TOO_SMALL) и следующей
             # без retry последняя подпись читалась бы из устаревшего
@@ -1533,9 +1547,7 @@ def sign_file(session, funcs):
             if last_signature_source is not signature:
                 ctypes.memset(last_signature_source, 0, len(last_signature_source))
             if retry_buffer is not None:
-                # Подпись записана в retry-буфер: добавляем его в затирание в
-                # finally и читаем результат именно из него.
-                sensitive_buffers.append(retry_buffer)
+                # Подпись записана в retry-буфер: читаем результат именно из него.
                 last_signature_source = retry_buffer
             else:
                 last_signature_source = signature
