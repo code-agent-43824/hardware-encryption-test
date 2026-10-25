@@ -1208,6 +1208,17 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
                 ctypes.byref(digest_len),
             )
             rv_ok(rv, "C_Digest(self-check)")
+            # pulDigestLen возвращает недоверенный модуль: при сбое или подмене
+            # он может сообщить длину дайджеста больше ёмкости буфера. Тогда
+            # C_Verify получил бы завышенную длину и читал бы за границей
+            # буфера дайджеста (нативное чтение соседней памяти кучи внутри
+            # модуля), поэтому длину проверяем до любого использования.
+            digest_capacity = info["digest_size"]
+            if int(digest_len.value) > digest_capacity:
+                raise PKCS11Error(
+                    f"Модуль вернул некорректную длину дайджеста: "
+                    f"{int(digest_len.value)} > ёмкости буфера {digest_capacity}"
+                )
             verify_data = digest
             verify_data_size = int(digest_len.value)
         verify_mechanism = CK_MECHANISM(info["verify_mechanism"], None, CK_ULONG(0))
