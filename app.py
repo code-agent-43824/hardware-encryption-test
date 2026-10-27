@@ -1145,6 +1145,19 @@ def decrypt_and_check(session, funcs, key_handle, algorithm, ciphertext, params,
             ctypes.byref(plaintext_len),
         )
         rv_ok(rv, f"C_Decrypt(data, {algorithm['name']})")
+        # pulPlaintextLen возвращает недоверенный модуль: при сбое или подмене
+        # он может сообщить длину открытого текста больше ёмкости буфера — как
+        # уже проверяется для ulSignatureLen (sign_once) и pulDigestLen
+        # (verify_signature). Завышенная длина привела бы к сравнению
+        # открытого текста по недоверенной длине и маскировала бы сбой модуля
+        # под безликую ошибку самопроверки, поэтому длину проверяем до
+        # любого использования.
+        plaintext_capacity = len(plaintext)
+        if int(plaintext_len.value) > plaintext_capacity:
+            raise PKCS11Error(
+                f"Модуль вернул некорректную длину открытого текста: "
+                f"{int(plaintext_len.value)} > ёмкости буфера {plaintext_capacity}"
+            )
         # Сравниваем буферы напрямую, не создавая bytes-копию открытого текста.
         decrypted = memoryview(plaintext)[: int(plaintext_len.value)]
         if decrypted != expected_plaintext:
