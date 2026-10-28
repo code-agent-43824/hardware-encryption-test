@@ -1346,6 +1346,12 @@ def encrypt_file(session, funcs, slot_id):
         if not measured_operations:
             raise PKCS11Error("Нет ни одной операции шифрования: количество и прогрев должны быть больше 0")
         for operation in measured_operations:
+            if retry_buffer is not None:
+                # Затираем retry-буфер предыдущей итерации ДО запуска новой
+                # операции: иначе при падении C_EncryptInit/C_Encrypt буфер с
+                # чувствительным шифротекстом остался бы незатёртым до finally.
+                ctypes.memset(retry_buffer, 0, len(retry_buffer))
+                retry_buffer = None
             encrypted_len, operation_elapsed, output_buffer = encrypt_with_generated_key(
                 session,
                 funcs,
@@ -1356,8 +1362,6 @@ def encrypt_file(session, funcs, slot_id):
                 encrypted_buffer,
                 operation,
             )
-            if retry_buffer is not None:
-                ctypes.memset(retry_buffer, 0, len(retry_buffer))
             retry_buffer = output_buffer if output_buffer is not encrypted_buffer else None
             operation_times.append(operation_elapsed)
         total_elapsed = time.perf_counter() - total_started
