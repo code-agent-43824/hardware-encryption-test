@@ -1046,15 +1046,32 @@ def encrypt_with_generated_key(
                 ctypes.byref(prepared_operation["output_length"]),
             )
             rv_ok(rv, f"C_Encrypt(data, {algorithm['name']})")
+            # Длину шифротекста сообщает недоверенный модуль: при сбое или
+            # подмене она может превысить ёмкость выделенного буфера. Как и
+            # для ulSignatureLen/pulDigestLen/pulPlaintextLen, проверяем до
+            # любого использования; проверка внутри try, чтобы временный
+            # буфер затирался при этой ошибке.
+            output_length = int(prepared_operation["output_length"].value)
+            if output_length > needed:
+                raise PKCS11Error(
+                    f"Модуль вернул некорректную длину шифротекста: "
+                    f"{output_length} > ёмкости буфера {needed}"
+                )
         except BaseException:
             ctypes.memset(output_buffer, 0, len(output_buffer))
             raise
         elapsed = time.perf_counter() - started
-        output_length = int(prepared_operation["output_length"].value)
         return output_length, elapsed, output_buffer
     rv_ok(rv, f"C_Encrypt(data, {algorithm['name']})")
-    elapsed = time.perf_counter() - started
     output_length = int(prepared_operation["output_length"].value)
+    # Та же проверка для основного пути: длина шифротекста от недоверенного
+    # модуля не может превышать ёмкость переданного буфера.
+    if output_length > len(encrypted_buffer):
+        raise PKCS11Error(
+            f"Модуль вернул некорректную длину шифротекста: "
+            f"{output_length} > ёмкости буфера {len(encrypted_buffer)}"
+        )
+    elapsed = time.perf_counter() - started
     return output_length, elapsed, encrypted_buffer
 
 
