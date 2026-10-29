@@ -1,7 +1,8 @@
 """Regression tests: a failed self-check (signature verification in sign_file
 or decryption check in encrypt_file) must surface as app.SelfCheckError that
 run_menu does NOT swallow, so the process exits with a non-zero code via main.
-Ordinary PKCS11Error keeps the old behaviour: message in the menu, loop goes on.
+An invalid output length from the PKCS#11 module is also fatal. Ordinary
+PKCS11Error keeps the old behaviour: message in the menu, loop goes on.
 
 The tests also verify that the existing resource cleanup is preserved:
 the key is destroyed once and every sensitive buffer is wiped even when the
@@ -152,6 +153,34 @@ class SignSelfCheckExitCodeTests(unittest.TestCase):
 
 
 class RunMenuExitCodeTests(unittest.TestCase):
+    def test_invalid_module_length_exits_main_with_code_one(self):
+        # Both menu actions must propagate a malformed module result to main;
+        # otherwise a subsequent normal menu exit would return code 0.
+        with tempfile.TemporaryDirectory() as directory:
+            library_path = Path(directory) / "module.so"
+            library_path.touch()
+            for choice in ("4", "5"):
+                with self.subTest(choice=choice):
+                    out = io.StringIO()
+                    with mock.patch.object(app.platform, "system", return_value="Linux"), \
+                            mock.patch("builtins.input", return_value=""), \
+                            mock.patch.object(app, "default_library_path", return_value=library_path), \
+                            mock.patch.object(app, "resolve_library_path", return_value=library_path), \
+                            mock.patch.object(app, "load_library", return_value=object()), \
+                            mock.patch.object(app, "prepare_functions", return_value={}), \
+                            mock.patch.object(app, "initialize_pkcs11", return_value=False), \
+                            mock.patch.object(app, "print_library_info"), \
+                            mock.patch.object(app, "get_token_slots", return_value=[1]), \
+                            mock.patch.object(app, "choose_token_slot", return_value=1), \
+                            mock.patch.object(app, "print_token_info"), \
+                            mock.patch.object(app, "show_menu", side_effect=[choice, "0"]) as menu, \
+                            mock.patch.object(app, "run_with_session",
+                                              side_effect=app.InvalidModuleLengthError("bad length")), \
+                            redirect_stdout(out):
+                        self.assertEqual(app.main(), 1)
+                    self.assertIn("Ошибка: bad length", out.getvalue())
+                    self.assertEqual(menu.call_count, 1)
+
     def test_selfcheck_error_escapes_run_menu(self):
         # The menu must not swallow a failed self-check: the exception has to
         # reach main, which returns exit code 1.

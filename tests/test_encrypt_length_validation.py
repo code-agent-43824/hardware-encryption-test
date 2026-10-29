@@ -75,7 +75,7 @@ class EncryptLengthValidationTests(unittest.TestCase):
             captured,
         )
         buffer = (app.CK_BYTE * capacity)()
-        with self.assertRaises(app.PKCS11Error) as ctx:
+        with self.assertRaises(app.InvalidModuleLengthError) as ctx:
             app.encrypt_with_generated_key(
                 1, funcs, 1, ALGORITHM,
                 app.CK_BYTE_PTR(), app.CK_ULONG(4), buffer, make_operation(capacity),
@@ -107,7 +107,7 @@ class EncryptLengthValidationTests(unittest.TestCase):
             captured,
         )
         buffer = (app.CK_BYTE * 8)()
-        with self.assertRaises(app.PKCS11Error) as ctx:
+        with self.assertRaises(app.InvalidModuleLengthError) as ctx:
             app.encrypt_with_generated_key(
                 1, funcs, 1, ALGORITHM,
                 app.CK_BYTE_PTR(), app.CK_ULONG(4), buffer, make_operation(8),

@@ -125,6 +125,14 @@ class SelfCheckError(PKCS11Error):
     """
 
 
+class InvalidModuleLengthError(PKCS11Error):
+    """Модуль вернул длину результата вне переданного выходного буфера.
+
+    После такой ошибки результату операции нельзя доверять. Меню передаёт её
+    в main, чтобы процесс завершился с ненулевым кодом.
+    """
+
+
 class CK_VERSION(ctypes.Structure):
     if PACK:
         _pack_ = PACK
@@ -1053,7 +1061,7 @@ def encrypt_with_generated_key(
             # буфер затирался при этой ошибке.
             output_length = int(prepared_operation["output_length"].value)
             if output_length > needed:
-                raise PKCS11Error(
+                raise InvalidModuleLengthError(
                     f"Модуль вернул некорректную длину шифротекста: "
                     f"{output_length} > ёмкости буфера {needed}"
                 )
@@ -1067,7 +1075,7 @@ def encrypt_with_generated_key(
     # Та же проверка для основного пути: длина шифротекста от недоверенного
     # модуля не может превышать ёмкость переданного буфера.
     if output_length > len(encrypted_buffer):
-        raise PKCS11Error(
+        raise InvalidModuleLengthError(
             f"Модуль вернул некорректную длину шифротекста: "
             f"{output_length} > ёмкости буфера {len(encrypted_buffer)}"
         )
@@ -1171,7 +1179,7 @@ def decrypt_and_check(session, funcs, key_handle, algorithm, ciphertext, params,
         # любого использования.
         plaintext_capacity = len(plaintext)
         if int(plaintext_len.value) > plaintext_capacity:
-            raise PKCS11Error(
+            raise InvalidModuleLengthError(
                 f"Модуль вернул некорректную длину открытого текста: "
                 f"{int(plaintext_len.value)} > ёмкости буфера {plaintext_capacity}"
             )
@@ -1245,7 +1253,7 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
             # модуля), поэтому длину проверяем до любого использования.
             digest_capacity = info["digest_size"]
             if int(digest_len.value) > digest_capacity:
-                raise PKCS11Error(
+                raise InvalidModuleLengthError(
                     f"Модуль вернул некорректную длину дайджеста: "
                     f"{int(digest_len.value)} > ёмкости буфера {digest_capacity}"
                 )
@@ -1581,7 +1589,7 @@ def sign_file(session, funcs):
             # подписи, поэтому длину проверяем до любого использования.
             signature_capacity = len(retry_buffer) if retry_buffer is not None else len(signature)
             if signature_length > signature_capacity:
-                raise PKCS11Error(
+                raise InvalidModuleLengthError(
                     f"Модуль вернул некорректную длину подписи: "
                     f"{signature_length} > ёмкости буфера {signature_capacity}"
                 )
@@ -1836,8 +1844,8 @@ def run_menu(funcs, slot_id):
             continue
         try:
             action()
-        except SelfCheckError:
-            # Провал самопроверки не проглатывается меню: исключение доходит
+        except (SelfCheckError, InvalidModuleLengthError):
+            # Провал самопроверки и некорректный результат модуля доходят
             # до main, которая печатает ошибку и возвращает код 1.
             raise
         except PKCS11Error as error:

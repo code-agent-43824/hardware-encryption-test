@@ -5,7 +5,7 @@ Contract:
 - If the module returns CKR_OK with a signature length greater than the
   capacity of the buffer that actually received the signature (the main
   signature buffer, or the CKR_BUFFER_TOO_SMALL retry buffer), sign_file must
-  raise PKCS11Error with a diagnostic message BEFORE any memmove copy or
+  raise InvalidModuleLengthError with a diagnostic message BEFORE any memmove copy or
   C_Verify call: otherwise ctypes.memmove reads past the end of the signature
   buffer (heap over-read) and C_Verify is invoked with an oversized length,
   causing a native out-of-bounds read inside the module.
@@ -90,7 +90,7 @@ class SignLengthValidationTests(unittest.TestCase):
         verify_out, memsets, output, err, error = self.run_sign_file(
             1, 1, steps, wrap=lambda f: inflate_sign_lengths(f, 16),
         )
-        self.assertIsNotNone(error)
+        self.assertIsInstance(error, app.InvalidModuleLengthError)
         self.assertNotIsInstance(error, app.SelfCheckError)
         self.assertIn("некорректную длину подписи", str(error))
         self.assertIn("272", str(error))
@@ -110,7 +110,7 @@ class SignLengthValidationTests(unittest.TestCase):
         verify_out, memsets, output, err, error = self.run_sign_file(
             1, 1, steps, wrap=lambda f: inflate_sign_lengths(f, 16),
         )
-        self.assertIsNotNone(error)
+        self.assertIsInstance(error, app.InvalidModuleLengthError)
         self.assertNotIsInstance(error, app.SelfCheckError)
         self.assertIn("316 > ёмкости буфера 300", str(error))
         self.assertEqual(verify_out, [])
@@ -143,7 +143,7 @@ class SignLengthValidationTests(unittest.TestCase):
         verify_out, memsets, output, err, error = self.run_sign_file(
             1, 2, steps, wrap=lambda f: inflate_sign_lengths(f, 1),
         )
-        self.assertIsNotNone(error)
+        self.assertIsInstance(error, app.InvalidModuleLengthError)
         self.assertIn("257", str(error))
         self.assertEqual(verify_out, [])
         self.assertIn(140, memsets)

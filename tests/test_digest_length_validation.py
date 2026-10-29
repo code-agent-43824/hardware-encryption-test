@@ -71,7 +71,7 @@ class DigestLengthValidationTests(unittest.TestCase):
         captured, memsets, error = self.run_verify(
             wrap=lambda f: inflate_digest_lengths(f, 8),
         )
-        self.assertIsNotNone(error)
+        self.assertIsInstance(error, app.InvalidModuleLengthError)
         self.assertIn("некорректную длину дайджеста", str(error))
         self.assertIn("40 > ёмкости буфера 32", str(error))
         self.assertNotIn("verify_inits", captured, "C_VerifyInit must not be called")
@@ -109,7 +109,7 @@ class DigestLengthValidationTests(unittest.TestCase):
                 1, wrapped, {"algorithm": app.CKK_GOSTR3410, "public": 9},
                 (app.CK_BYTE * 4)(*b"data"), 4, signature_buffer(64, 0x5A),
             )
-            with self.assertRaises(app.PKCS11Error) as ctx:
+            with self.assertRaises(app.InvalidModuleLengthError) as ctx:
                 app.verify_signature(
                     1, wrapped, {"algorithm": app.CKK_GOSTR3410, "public": 9},
                     (app.CK_BYTE * 4)(*b"data"), 4, signature_buffer(64, 0x5A),

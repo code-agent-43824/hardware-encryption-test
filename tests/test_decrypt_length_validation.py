@@ -47,7 +47,7 @@ class DecryptLengthValidationTests(unittest.TestCase):
         capacity = 6
         captured = {}
         funcs = decrypt_ok_funcs(capacity, reported_length=capacity + 8, captured=captured)
-        with self.assertRaises(app.PKCS11Error) as ctx:
+        with self.assertRaises(app.InvalidModuleLengthError) as ctx:
             app.decrypt_and_check(
                 1, funcs, 1,
                 {"name": "test", "encrypt_mechanism": 1},
@@ -65,7 +65,7 @@ class DecryptLengthValidationTests(unittest.TestCase):
         capacity = 6
         captured = {}
         funcs = decrypt_ok_funcs(capacity, reported_length=capacity + 8, captured=captured)
-        with self.assertRaises(app.PKCS11Error):
+        with self.assertRaises(app.InvalidModuleLengthError):
             app.decrypt_and_check(
                 1, funcs, 1,
                 {"name": "test", "encrypt_mechanism": 1},
