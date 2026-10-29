@@ -1568,7 +1568,15 @@ def sign_file(session, funcs):
         total_started = time.perf_counter()
         last_signature_length = 0
         last_signature_source = signature
+        previous_retry_buffer = None
         for output_length in measured_output_lengths:
+            if previous_retry_buffer is not None:
+                # Затираем retry-буфер подписи предыдущей измеряемой операции
+                # ДО запуска новой: иначе при ошибке или падении недоверенного
+                # модуля в C_SignInit/C_Sign подпись оставалась бы в памяти
+                # незатёртой до finally (тот же порядок, что в encrypt_file).
+                ctypes.memset(previous_retry_buffer, 0, len(previous_retry_buffer))
+                previous_retry_buffer = None
             operation_elapsed, signature_length, retry_buffer = sign_once(
                 session,
                 funcs,
@@ -1597,11 +1605,10 @@ def sign_file(session, funcs):
             # иначе после итерации с retry (CKR_BUFFER_TOO_SMALL) и следующей
             # без retry последняя подпись читалась бы из устаревшего
             # retry-буфера, а сам буфер оставался бы незатёртым до finally.
-            if last_signature_source is not signature:
-                ctypes.memset(last_signature_source, 0, len(last_signature_source))
             if retry_buffer is not None:
                 # Подпись записана в retry-буфер: читаем результат именно из него.
                 last_signature_source = retry_buffer
+                previous_retry_buffer = retry_buffer
             else:
                 last_signature_source = signature
             operation_times.append(operation_elapsed)
