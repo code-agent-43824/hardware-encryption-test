@@ -1336,6 +1336,7 @@ def encrypt_file(session, funcs, slot_id):
     key_handle = None
     last_params = b""
     last_output_length = 0
+    last_output_preview_base64 = ""
     retry_buffer = None
 
     try:
@@ -1396,12 +1397,16 @@ def encrypt_file(session, funcs, slot_id):
         # буфер не нужна: сохраняем только длину, чтобы после очистки не
         # оставалось указателя на затёртую память.
         last_output_length = encrypted_len
-        # Копия для Base64-превью создаётся внутри try, до finally:
-        # finally затирает sensitive_buffers, и превью после блока
-        # печатало бы байты уже очищенного буфера (нули).
-        last_output_preview = bytes(
-            memoryview(output_buffer)[: min(encrypted_len, PREVIEW_CIPHERTEXT_BYTES)]
-        )
+        # Копия для Base64-превью создаётся внутри try, до finally — и в
+        # затираемый ctypes-буфер (в sensitive_buffers): bytes(...)-копия
+        # оставалась бы в heap незатёртой до GC. Base64 вычисляется здесь же
+        # напрямую из буфера (как в sign_file), строка печатается после
+        # finally, когда сам буфер уже затёрт.
+        preview_size = min(encrypted_len, PREVIEW_CIPHERTEXT_BYTES)
+        preview_buffer = (CK_BYTE * preview_size)()
+        sensitive_buffers.append(preview_buffer)
+        ctypes.memmove(preview_buffer, output_buffer, preview_size)
+        last_output_preview_base64 = base64.b64encode(preview_buffer).decode("ascii")[:256]
         try:
             decrypt_and_check(
                 session,
@@ -1459,7 +1464,7 @@ def encrypt_file(session, funcs, slot_id):
     )
     print(f"Размер последнего шифротекста: {last_output_length} байт")
     print("Последний шифротекст (Base64, первые 256 символов):")
-    print(base64.b64encode(last_output_preview).decode("ascii")[:256])
+    print(last_output_preview_base64)
 
 
 def delete_pair(session, funcs):
