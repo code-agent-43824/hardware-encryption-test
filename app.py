@@ -1389,6 +1389,12 @@ def encrypt_file(session, funcs, slot_id):
                 operation,
             )
             retry_buffer = output_buffer if output_buffer is not encrypted_buffer else None
+            if retry_buffer is not None:
+                # Retry-буфер регистрируем в sensitive_buffers сразу после
+                # получения: единый путь очистки в finally затирает его при
+                # любом исходе (как в sign_file), в дополнение к упреждающему
+                # затиранию перед следующей операцией.
+                sensitive_buffers.append(retry_buffer)
             operation_times.append(operation_elapsed)
         total_elapsed = time.perf_counter() - total_started
         last_params = measured_operations[-1]["params"]
