@@ -1423,6 +1423,11 @@ def encrypt_file(session, funcs, slot_id):
                 last_params,
                 memoryview(data_buffer),
             )
+        except InvalidModuleLengthError:
+            # Некорректная длина результата от недоверенного модуля — отдельный
+            # класс ошибки (v2.12): пробрасываем как есть, чтобы диагностика
+            # подмены/сбоя модуля не превращалась в рядовый провал самопроверки.
+            raise
         except PKCS11Error as error:
             # Провал самопроверки — сигнал о неисправности токена или модуля:
             # сообщаем явно в stderr (как в sign_file) и пробрасываем ошибку
@@ -1646,6 +1651,10 @@ def sign_file(session, funcs):
         )
         try:
             verify_signature(session, funcs, pair, data_buffer, file_size, last_signature_bytes)
+        except InvalidModuleLengthError:
+            # Как в encrypt_file: некорректная длина результата от недоверенного
+            # модуля пробрасывается без переклейки в SelfCheckError.
+            raise
         except PKCS11Error as error:
             if error.rv == CKR_SIGNATURE_INVALID:
                 print("Самопроверка подписи: НЕ УСПЕШНО — подпись не прошла проверку", file=sys.stderr)
