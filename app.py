@@ -1437,10 +1437,11 @@ def encrypt_file(session, funcs, slot_id):
                 cleanup_error = PKCS11Error("C_DestroyObject(secret encryption key)", rv)
         # Затираем буферы до любого raise: прерывание finally раньше memset
         # оставляло бы открытый текст и шифротекст в памяти незатёртыми.
+        # Retry-буфер регистрируется в sensitive_buffers сразу после получения,
+        # поэтому отдельный проход по нему здесь не нужен: единственный путь
+        # очистки — общий цикл ниже (как в sign_file).
         for buffer in sensitive_buffers:
             ctypes.memset(buffer, 0, len(buffer))
-        if retry_buffer is not None:
-            ctypes.memset(retry_buffer, 0, len(retry_buffer))
         if cleanup_error is not None:
             if sys.exc_info()[0] is not None:
                 print(f"Предупреждение при очистке после исходной ошибки: {cleanup_error}", file=sys.stderr)
