@@ -831,19 +831,34 @@ def login(funcs, session):
         pin = DEFAULT_PIN
         used_default_pin = True
     pin_bytes = pin.encode("utf-8")
-    rv = funcs["C_Login"](session, CK_USER_TYPE(CKU_USER), pin_bytes, CK_ULONG(len(pin_bytes)))
-    if rv == CKR_OK:
-        return True
-    if rv == CKR_USER_ALREADY_LOGGED_IN:
-        return False
-    if rv == CKR_PIN_INCORRECT:
-        if used_default_pin:
-            raise PKCS11Error(
-                f"PIN не введён, PIN по умолчанию {DEFAULT_PIN} не подошёл. Введите правильный PIN",
-                rv,
-            )
-        raise PKCS11Error("Неверный PIN", rv)
-    raise PKCS11Error("C_Login", rv)
+    # PIN копируется в затираемый ctypes-буфер и обнуляется при любом исходе
+    # C_Login: неизменяемый bytes оставался бы в heap до GC, тогда как весь
+    # остальной чувствительный материал (файлы, шифротекст, подписи) в этом
+    # инструменте затирается. Остаточные копии (str из getpass/input, временный
+    # bytes из encode, копия в нативном модуле) неустранимы — затирание в
+    # Python остаётся best effort, как оговорено в HANDOFF.
+    pin_buffer = (CK_BYTE * len(pin_bytes)).from_buffer_copy(pin_bytes)
+    try:
+        rv = funcs["C_Login"](
+            session,
+            CK_USER_TYPE(CKU_USER),
+            ctypes.cast(pin_buffer, ctypes.c_char_p),
+            CK_ULONG(len(pin_buffer)),
+        )
+        if rv == CKR_OK:
+            return True
+        if rv == CKR_USER_ALREADY_LOGGED_IN:
+            return False
+        if rv == CKR_PIN_INCORRECT:
+            if used_default_pin:
+                raise PKCS11Error(
+                    f"PIN не введён, PIN по умолчанию {DEFAULT_PIN} не подошёл. Введите правильный PIN",
+                    rv,
+                )
+            raise PKCS11Error("Неверный PIN", rv)
+        raise PKCS11Error("C_Login", rv)
+    finally:
+        ctypes.memset(pin_buffer, 0, len(pin_buffer))
 
 
 def logout(funcs, session):
