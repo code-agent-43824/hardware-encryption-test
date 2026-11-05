@@ -1059,6 +1059,13 @@ def encrypt_with_generated_key(
         # По PKCS#11 после CKR_BUFFER_TOO_SMALL токен сообщает нужный размер,
         # операция остаётся инициализированной — повторяем C_Encrypt с буфером нужного размера.
         needed = int(prepared_operation["output_length"].value)
+        # Размер сообщает недоверенный модуль: отвергаем абсурдные значения
+        # (0 или больше разумного потолка) ДО аллокации, тем же классом
+        # ошибки, что и проверка длины после повторного вызова.
+        if needed == 0 or needed > MAX_RETRY_OUTPUT_BYTES:
+            raise InvalidModuleLengthError(
+                f"Модуль вернул некорректную длину шифротекста для повторного вызова: {needed}"
+            )
         output_buffer = (CK_BYTE * needed)()
         try:
             rv = funcs["C_Encrypt"](
@@ -1116,6 +1123,13 @@ def sign_once(session, funcs, private_key, mechanism, data_pointer, data_size, s
         # нужного размера. Как и в encrypt_with_generated_key, временный
         # буфер затирается при ошибке повторного вызова.
         needed = int(output_length.value)
+        # Размер сообщает недоверенный модуль: отвергаем абсурдные значения
+        # (0 или больше разумного потолка) ДО аллокации — тот же контракт
+        # валидации длины, что и после повторного вызова (v2.12).
+        if needed == 0 or needed > MAX_RETRY_OUTPUT_BYTES:
+            raise InvalidModuleLengthError(
+                f"Модуль вернул некорректную длину подписи для повторного вызова: {needed}"
+            )
         retry_buffer = (CK_BYTE * needed)()
         try:
             rv = funcs["C_Sign"](
@@ -1311,6 +1325,12 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
 
 # Initial output headroom; CKR_BUFFER_TOO_SMALL still resizes if a module needs more.
 MAX_CIPHERTEXT_OVERHEAD = 32
+
+# Верхняя граница разумного размера retry-буфера: недоверенный модуль на
+# CKR_BUFFER_TOO_SMALL может сообщить любую длину (например, 1 ТиБ). Без
+# проверки она уходила в (CK_BYTE * needed)() до какой-либо валидации —
+# попытка аллокации заканчивалась MemoryError или деградацией через swap.
+MAX_RETRY_OUTPUT_BYTES = 1 << 30
 
 # Сколько байт последнего шифротекста читается для Base64-превью (256 символов base64 = 192 байта).
 PREVIEW_CIPHERTEXT_BYTES = 192
