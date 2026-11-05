@@ -26,6 +26,12 @@ from unittest import mock
 import app
 from test_file_input_errors import encrypt_funcs, sign_pair_funcs
 
+# Портируемое «гигантское» значение: больше MAX_RETRY_OUTPUT_BYTES (1 ГиБ),
+# но помещается в 32-битный CK_ULONG на Windows (c_ulong = 4 байта). Значение
+# порядка 1 ТиБ туда не помещается, и fake-модуль падал бы OverflowError ещё
+# до передачи длины в тестируемый код.
+HUGE_NEEDED = 3 << 30
+
 
 def run_sign_file(file_path, count, warmup, steps):
     calls = []
@@ -67,8 +73,8 @@ class SignRetryAllocationValidationTests(unittest.TestCase):
         self.assertIn("некорректную длину подписи для повторного вызова: 0", str(ctx.exception))
 
     def test_sign_rejects_huge_needed_before_allocation(self):
-        # 1 ТиБ: раньше — безусловная аллокация и MemoryError (unexpected).
-        huge = (1 << 40) + 7
+        # Раньше — безусловная аллокация и MemoryError (unexpected).
+        huge = HUGE_NEEDED
         steps = [("too_small", huge)]
         out = io.StringIO()
         with mock.patch("builtins.input", side_effect=[str(self.file_path), "1", "1", ""]), \
@@ -82,7 +88,7 @@ class SignRetryAllocationValidationTests(unittest.TestCase):
         # Многошаговая последовательность: warmup ok; measured op1 ok;
         # op2 TOO_SMALL с гигантским needed → InvalidModuleLengthError,
         # статус успеха не печатается.
-        huge = 1 << 40
+        huge = HUGE_NEEDED
         steps = [
             ("ok", b"\xA1" * 64),
             ("ok", b"\xA2" * 64),
@@ -139,7 +145,7 @@ class EncryptRetryAllocationValidationTests(unittest.TestCase):
         self.assertIn("некорректную длину шифротекста для повторного вызова: 0", str(ctx.exception))
 
     def test_encrypt_rejects_huge_needed_before_allocation(self):
-        huge = (1 << 40) + 7
+        huge = HUGE_NEEDED
         funcs = self._scripted_funcs([("too_small", huge)])
         out = io.StringIO()
         with mock.patch("builtins.input", side_effect=[str(self.file_path), "1", "1", "0", "0"]), \
@@ -154,7 +160,7 @@ class EncryptRetryAllocationValidationTests(unittest.TestCase):
         # Многошаговая последовательность: warmup ok; measured op1 ok;
         # op2 TOO_SMALL с гигантским needed. finally обязан затереть все
         # чувствительные буферы и уничтожить временный ключ ровно один раз.
-        huge = 1 << 40
+        huge = HUGE_NEEDED
         state = {}
         funcs, _ = encrypt_funcs([], [], state)
         state["plaintext"] = b"PLAINTEXT-DATA" * 10
