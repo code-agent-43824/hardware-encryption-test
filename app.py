@@ -1234,7 +1234,20 @@ def signature_buffer_length(session, funcs, pair):
                 continue
             modulus_bits = attr_ulong(session, funcs, handle, CKA_MODULUS_BITS)
             if modulus_bits:
-                return int(modulus_bits) // 8
+                # CKA_MODULUS_BITS сообщает недоверенный модуль: при сбое или
+                # подмене он может запросить аллокацию гигантского буфера
+                # подписи — тот же класс угрозы, что уже закрыт валидацией
+                # retry-размера ДО аллокации (sign_once,
+                # encrypt_with_generated_key). Проверяем ёмкость здесь,
+                # чтобы (CK_BYTE * capacity)() в sign_file не выполнялся
+                # с непроверенным значением.
+                capacity = int(modulus_bits) // 8
+                if capacity == 0 or capacity > MAX_RETRY_OUTPUT_BYTES:
+                    raise InvalidModuleLengthError(
+                        f"Модуль вернул некорректный размер модуля подписи: "
+                        f"{int(modulus_bits)} бит (ёмкость буфера {capacity})"
+                    )
+                return capacity
     return info["signature_size"]
 
 
