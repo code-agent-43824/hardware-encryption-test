@@ -1660,7 +1660,17 @@ def sign_file(session, funcs):
             # подмене он может сообщить длину больше ёмкости буфера. Тогда
             # memmove копии подписи и C_Verify читали бы за границей буфера
             # подписи, поэтому длину проверяем до любого использования.
+            # Нулевая длина при CKR_OK тоже нарушает контракт PKCS#11 для
+            # подписи: без проверки пустая подпись ушла бы в C_Verify, а сбой
+            # модуля маскировался бы под рядовый провал самопроверки — тот же
+            # контракт «0 или завышенная длина до использования», что и в
+            # sign_once/signature_buffer_length.
             signature_capacity = len(retry_buffer) if retry_buffer is not None else len(signature)
+            if signature_length == 0:
+                raise InvalidModuleLengthError(
+                    f"Модуль вернул некорректную длину подписи: 0 "
+                    f"(ёмкость буфера {signature_capacity})"
+                )
             if signature_length > signature_capacity:
                 raise InvalidModuleLengthError(
                     f"Модуль вернул некорректную длину подписи: "
