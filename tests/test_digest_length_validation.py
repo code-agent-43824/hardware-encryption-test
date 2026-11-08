@@ -37,6 +37,23 @@ def inflate_digest_lengths(base_funcs, extra):
     return base_funcs
 
 
+def zero_digest_length(base_funcs):
+    """Wrap C_Digest so a successful call reports a zero digest length
+    (simulating a module that violates the PKCS#11 contract, same class
+    as the zero-length signature rejected in sign_file)."""
+    orig_digest = base_funcs["C_Digest"]
+
+    def zeroing_digest(session, data, size, output, length):
+        rv = orig_digest(session, data, size, output, length)
+        if rv == app.CKR_OK:
+            dl = ctypes.cast(length, ctypes.POINTER(app.CK_ULONG))
+            dl[0] = app.CK_ULONG(0)
+        return rv
+
+    base_funcs["C_Digest"] = zeroing_digest
+    return base_funcs
+
+
 class DigestLengthValidationTests(unittest.TestCase):
     def run_verify(self, wrap=None, signature_size=64):
         """Run verify_signature with a GOST-256 pair. Returns (captured,
@@ -127,6 +144,73 @@ class DigestLengthValidationTests(unittest.TestCase):
         self.assertEqual(len(captured["verifies"]), 1)
         self.assertEqual(captured["verifies"][0][0], 32)
         self.assertEqual(len(captured["digest_inits"]), 1)
+
+    def test_zero_digest_length_raises_before_verify(self):
+        # A zero digest length at CKR_OK violates the PKCS#11 contract the
+        # same way a zero signature length does: verify_signature must reject
+        # it with InvalidModuleLengthError BEFORE C_VerifyInit/C_Verify and
+        # wipe the digest buffer in finally.
+        captured, memsets, error = self.run_verify(
+            wrap=lambda f: zero_digest_length(f),
+        )
+        self.assertIsInstance(error, app.InvalidModuleLengthError)
+        self.assertIn("некорректную длину дайджеста: 0", str(error))
+        self.assertIn("ёмкость буфера 32", str(error))
+        self.assertNotIn("verify_inits", captured, "C_VerifyInit must not be called")
+        self.assertNotIn("verifies", captured, "C_Verify must not be called")
+        self.assertIn(32, memsets, "digest buffer must be wiped")
+
+    def test_zero_digest_length_not_masked_as_selfcheck_failure(self):
+        # The zero-length rejection must surface as InvalidModuleLengthError
+        # (untrusted-module contract violation), not as a generic PKCS11Error
+        # that callers would report as an ordinary failed self-check.
+        captured, memsets, error = self.run_verify(
+            wrap=lambda f: zero_digest_length(f),
+        )
+        self.assertIsNotNone(error)
+        self.assertNotIsInstance(error, app.SelfCheckError)
+        self.assertNotIn("Самопроверка", str(error))
+
+    def test_zero_digest_length_in_sequence_leaves_no_unwiped_state(self):
+        # First verification succeeds; the second one reports a zero digest
+        # length. The first C_Verify must have happened, the second must not,
+        # and the digest of the failed call must be wiped.
+        captured = {}
+        wrapped = make_funcs(captured)
+        orig_digest = wrapped["C_Digest"]
+        calls = []
+
+        def zeroing_on_second_call(session, data, size, output, length):
+            calls.append("digest")
+            rv = orig_digest(session, data, size, output, length)
+            if rv == app.CKR_OK and len(calls) > 1:
+                dl = ctypes.cast(length, ctypes.POINTER(app.CK_ULONG))
+                dl[0] = app.CK_ULONG(0)
+            return rv
+
+        wrapped["C_Digest"] = zeroing_on_second_call
+
+        orig_memset = ctypes.memset
+        memsets = []
+
+        def logging_memset(addr, value, size):
+            memsets.append(app.native_int(size))
+            return orig_memset(addr, value, size)
+
+        with mock.patch.object(ctypes, "memset", logging_memset):
+            app.verify_signature(
+                1, wrapped, {"algorithm": app.CKK_GOSTR3410, "public": 9},
+                (app.CK_BYTE * 4)(*b"data"), 4, signature_buffer(64, 0x5A),
+            )
+            with self.assertRaises(app.InvalidModuleLengthError) as ctx:
+                app.verify_signature(
+                    1, wrapped, {"algorithm": app.CKK_GOSTR3410, "public": 9},
+                    (app.CK_BYTE * 4)(*b"data"), 4, signature_buffer(64, 0x5A),
+                )
+        self.assertIn("некорректную длину дайджеста: 0", str(ctx.exception))
+        self.assertEqual(len(captured["verifies"]), 1, "only the first verify must run")
+        self.assertEqual(captured["verifies"][0][0], 32)
+        self.assertIn(32, memsets, "digest of the failed call must be wiped")
 
     def test_inflated_digest_rsa_path_unaffected(self):
         # RSA has no digest stage: the inflated C_Digest wrapper must never be

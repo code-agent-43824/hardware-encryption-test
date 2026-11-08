@@ -1294,7 +1294,19 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
             # буфера дайджеста (нативное чтение соседней памяти кучи внутри
             # модуля), поэтому длину проверяем до любого использования.
             digest_capacity = info["digest_size"]
-            if int(digest_len.value) > digest_capacity:
+            digest_length = int(digest_len.value)
+            if digest_length == 0:
+                # Нулевая длина дайджеста при CKR_OK тоже нарушает контракт
+                # PKCS#11 (как нулевая ulSignatureLen в sign_file/sign_once):
+                # без проверки пустой дайджест ушёл бы в C_Verify, а сбой или
+                # подмена модуля маскировались бы под рядовый провал
+                # самопроверки — тот же контракт «0 или завышенная длина до
+                # использования», что и в остальных ветках.
+                raise InvalidModuleLengthError(
+                    f"Модуль вернул некорректную длину дайджеста: 0 "
+                    f"(ёмкость буфера {digest_capacity})"
+                )
+            if digest_length > digest_capacity:
                 raise InvalidModuleLengthError(
                     f"Модуль вернул некорректную длину дайджеста: "
                     f"{int(digest_len.value)} > ёмкости буфера {digest_capacity}"
