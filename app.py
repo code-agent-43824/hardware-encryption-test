@@ -1082,6 +1082,16 @@ def encrypt_with_generated_key(
             # любого использования; проверка внутри try, чтобы временный
             # буфер затирался при этой ошибке.
             output_length = int(prepared_operation["output_length"].value)
+            # Нулевая длина при CKR_OK нарушает контракт PKCS#11 так же, как
+            # нулевая ulSignatureLen (sign_file) и pulDigestLen
+            # (verify_signature): шифротекст нулевой длины при непустых
+            # входных данных бессмыслен, а сбой модуля маскировался бы под
+            # рядовый провал самопроверки. Отвергаем до использования.
+            if output_length == 0:
+                raise InvalidModuleLengthError(
+                    f"Модуль вернул некорректную длину шифротекста: 0 "
+                    f"(ёмкость буфера {needed})"
+                )
             if output_length > needed:
                 raise InvalidModuleLengthError(
                     f"Модуль вернул некорректную длину шифротекста: "
@@ -1094,6 +1104,14 @@ def encrypt_with_generated_key(
         return output_length, elapsed, output_buffer
     rv_ok(rv, f"C_Encrypt(data, {algorithm['name']})")
     output_length = int(prepared_operation["output_length"].value)
+    # Нулевая длина при CKR_OK нарушает контракт PKCS#11 так же, как
+    # нулевая ulSignatureLen/pulDigestLen: отвергаем до любого использования
+    # (до превью, памяти и самопроверки расшифрования).
+    if output_length == 0:
+        raise InvalidModuleLengthError(
+            f"Модуль вернул некорректную длину шифротекста: 0 "
+            f"(ёмкость буфера {len(encrypted_buffer)})"
+        )
     # Та же проверка для основного пути: длина шифротекста от недоверенного
     # модуля не может превышать ёмкость переданного буфера.
     if output_length > len(encrypted_buffer):
