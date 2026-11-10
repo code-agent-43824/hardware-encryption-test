@@ -1225,6 +1225,19 @@ def decrypt_and_check(session, funcs, key_handle, algorithm, ciphertext, params,
         # под безликую ошибку самопроверки, поэтому длину проверяем до
         # любого использования.
         plaintext_capacity = len(plaintext)
+        # Нулевая длина при CKR_OK нарушает контракт PKCS#11 так же, как
+        # нулевая ulSignatureLen (sign_file) и pulDigestLen
+        # (verify_signature): без проверки пустой открытый текст сравнился бы
+        # с ожидаемым по нулевой длине, а сбой или подмена модуля
+        # маскировались бы под рядовый провал самопроверки (а при пустом
+        # ожидаемом тексте сломанный модуль вообще прошёл бы самопроверку) —
+        # тот же контракт «0 или завышенная длина до использования», что и
+        # в остальных ветках.
+        if int(plaintext_len.value) == 0:
+            raise InvalidModuleLengthError(
+                f"Модуль вернул некорректную длину открытого текста: 0 "
+                f"(ёмкость буфера {plaintext_capacity})"
+            )
         if int(plaintext_len.value) > plaintext_capacity:
             raise InvalidModuleLengthError(
                 f"Модуль вернул некорректную длину открытого текста: "
