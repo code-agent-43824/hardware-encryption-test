@@ -1301,6 +1301,19 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
     info = KEY_TYPES.get(algorithm)
     if not info or "verify_mechanism" not in info:
         raise PKCS11Error(f"Неподдерживаемый тип ключа для проверки подписи: {pair_algorithm_name(algorithm)}")
+    # Длину подписи вызывающий код берёт из данных недоверенного модуля
+    # (ulSignatureLen): нулевая длина при CKR_OK нарушает контракт PKCS#11
+    # для всех поддерживаемых механизмов проверки, как нулевой ulSignatureLen
+    # в sign_once/sign_file. Без проверки C_Verify получил бы пустую подпись,
+    # а сбой или подмена модуля маскировались бы под безликий провал
+    # самопроверки. Отвергаем до любого использования (до C_DigestInit/
+    # C_VerifyInit): тот же контракт «0 или завышенная длина до использования»,
+    # что и в остальных ветках; завышенную длину до вызова отвергает
+    # валидация ёмкости буфера в sign_file.
+    if len(signature_bytes) == 0:
+        raise InvalidModuleLengthError(
+            "Модуль вернул некорректную длину подписи для самопроверки: 0"
+        )
     verify_data = data_buffer
     verify_data_size = data_size
     signature = None
