@@ -388,6 +388,19 @@ def attr_bytes(session, funcs, obj_handle, attr_type):
         return None
     if size == 0:
         return b""
+    # Размер атрибута сообщает недоверенный модуль: отвергаем абсурдные
+    # значения ДО аллокации — тот же контракт, что для retry-буферов
+    # (encrypt_with_generated_key, sign_once) и ёмкости подписи из
+    # CKA_MODULUS_BITS (signature_buffer_length, которая сама читает атрибут
+    # через attr_bytes, поэтому её проверка ёмкости не спасает от аллокации
+    # здесь). Без проверки гигантская длина уходила в create_string_buffer
+    # и заканчивалась MemoryError/swap вместо диагностируемой ошибки
+    # недоверенного модуля (InvalidModuleLengthError, не маскируется).
+    if size > MAX_RETRY_OUTPUT_BYTES:
+        raise InvalidModuleLengthError(
+            f"Модуль вернул некорректную длину атрибута 0x{attr_type:08X}: "
+            f"{size} (превышен потолок {MAX_RETRY_OUTPUT_BYTES})"
+        )
     buffer = ctypes.create_string_buffer(size)
     template[0].pValue = ctypes.cast(buffer, CK_VOID_PTR)
     template[0].ulValueLen = CK_ULONG(size)
