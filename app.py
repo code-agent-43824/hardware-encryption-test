@@ -280,6 +280,15 @@ def read_file_into_wipeable_buffer(file_path):
     Возвращает (буфер, размер файла в байтах).
     """
     file_size = file_path.stat().st_size
+    # Размер файла сообщает файловая система по пользовательскому пути:
+    # проверяем лимит ДО открытия файла и аллокации буфера размером с файл,
+    # чтобы гигантский запрос заканчивался диагностируемой ошибкой, а не
+    # MemoryError после (частичного) чтения.
+    if file_size > MAX_INPUT_FILE_BYTES:
+        raise PKCS11Error(
+            f"Файл слишком большой: {file_path} ({file_size} байт, "
+            f"лимит {MAX_INPUT_FILE_BYTES} байт)"
+        )
     data_buffer = (CK_BYTE * file_size)()
     writable = memoryview(data_buffer).cast("B")
     probe = bytearray(1)
@@ -1426,6 +1435,16 @@ MAX_RETRY_OUTPUT_BYTES = 1 << 30
 
 # Сколько байт последнего шифротекста читается для Base64-превью (256 символов base64 = 192 байта).
 PREVIEW_CIPHERTEXT_BYTES = 192
+
+# Верхняя граница размера входного файла: размер контролирует пользователь, и
+# encrypt_file/sign_file аллоцируют по буферу размером с файл (вход + выход,
+# суммарно ~2× размера). Без проверки гигантский файл (опечатка в пути,
+# образ диска) заканчивался MemoryError с сырым traceback через generic-
+# обработчик run_menu либо деградацией через swap — вместо диагностируемой
+# ошибки до аллокации. Тот же контракт «валидация пользовательского размера
+# до аллокации», что для retry-буферов (MAX_RETRY_OUTPUT_BYTES), атрибутов
+# модуля (attr_bytes) и ёмкости подписи (CKA_MODULUS_BITS).
+MAX_INPUT_FILE_BYTES = 1 << 30
 
 
 def encrypt_file(session, funcs, slot_id):
