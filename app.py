@@ -1446,6 +1446,16 @@ PREVIEW_CIPHERTEXT_BYTES = 192
 # модуля (attr_bytes) и ёмкости подписи (CKA_MODULUS_BITS).
 MAX_INPUT_FILE_BYTES = 1 << 30
 
+# Верхняя граница количества элементов в списках, которые возвращает
+# недоверенный модуль (C_GetMechanismList, C_GetSlotList): счётчик сообщает
+# сам модуль, и без проверки гигантское значение уходило в
+# (CK_MECHANISM_TYPE * count)() до какой-либо валидации — MemoryError или
+# деградация через swap вместо диагностируемой ошибки. Тот же контракт
+# «валидация размера от недоверенного модуля ДО аллокации», что для
+# retry-буферов (MAX_RETRY_OUTPUT_BYTES), атрибутов (attr_bytes), ёмкости
+# подписи (CKA_MODULUS_BITS) и входного файла (MAX_INPUT_FILE_BYTES).
+MAX_MODULE_LIST_COUNT = 1 << 16
+
 
 def encrypt_file(session, funcs, slot_id):
     raw_path = input("Что зашифровать? ").strip().strip('"')
@@ -1904,9 +1914,27 @@ def get_token_slots(funcs):
     rv_ok(rv, "C_GetSlotList(count)")
     if count.value == 0:
         raise PKCS11Error("Токен не найден")
-    slots = (CK_SLOT_ID * count.value)()
+    # Количество слотов сообщает недоверенный модуль: отвергаем абсурдные
+    # значения ДО аллокации — тот же контракт, что для списков механизмов
+    # (get_mechanism_list), retry-буферов и атрибутов.
+    capacity = int(count.value)
+    if capacity > MAX_MODULE_LIST_COUNT:
+        raise InvalidModuleLengthError(
+            f"Модуль вернул некорректное количество слотов: {capacity} "
+            f"(превышен потолок {MAX_MODULE_LIST_COUNT})"
+        )
+    slots = (CK_SLOT_ID * capacity)()
     rv = funcs["C_GetSlotList"](CK_BBOOL(1), slots, ctypes.byref(count))
     rv_ok(rv, "C_GetSlotList(data)")
+    # Счётчик после повторного вызова тоже сообщает недоверенный модуль:
+    # при CKR_OK он может превысить аллоцированную ёмкость — тогда
+    # индексация ниже читала бы за границей буфера. Проверяем до любого
+    # использования.
+    if int(count.value) > capacity:
+        raise InvalidModuleLengthError(
+            f"Модуль вернул некорректное количество слотов: "
+            f"{int(count.value)} > ёмкости буфера {capacity}"
+        )
     return [native_int(slots[index]) for index in range(int(count.value))]
 
 
@@ -1967,9 +1995,30 @@ def get_mechanism_list(funcs, slot_id):
     rv_ok(rv, "C_GetMechanismList(count)")
     if count.value == 0:
         return []
-    mechanisms = (CK_MECHANISM_TYPE * count.value)()
+    # Количество механизмов сообщает недоверенный модуль: отвергаем
+    # абсурдные значения ДО аллокации — тот же контракт, что для
+    # retry-буферов (encrypt_with_generated_key, sign_once) и атрибутов
+    # (attr_bytes). Без проверки гигантский счётчик уходил в
+    # (CK_MECHANISM_TYPE * count)() и заканчивался MemoryError/swap вместо
+    # диагностируемой ошибки недоверенного модуля.
+    capacity = int(count.value)
+    if capacity > MAX_MODULE_LIST_COUNT:
+        raise InvalidModuleLengthError(
+            f"Модуль вернул некорректное количество механизмов: {capacity} "
+            f"(превышен потолок {MAX_MODULE_LIST_COUNT})"
+        )
+    mechanisms = (CK_MECHANISM_TYPE * capacity)()
     rv = funcs["C_GetMechanismList"](slot_id, mechanisms, ctypes.byref(count))
     rv_ok(rv, "C_GetMechanismList(data)")
+    # Счётчик после повторного вызова тоже сообщает недоверенный модуль:
+    # при CKR_OK он может превысить аллоцированную ёмкость — тогда
+    # индексация ниже читала бы за границей буфера. Проверяем до любого
+    # использования.
+    if int(count.value) > capacity:
+        raise InvalidModuleLengthError(
+            f"Модуль вернул некорректное количество механизмов: "
+            f"{int(count.value)} > ёмкости буфера {capacity}"
+        )
     return [int(mechanisms[index]) for index in range(int(count.value))]
 
 
