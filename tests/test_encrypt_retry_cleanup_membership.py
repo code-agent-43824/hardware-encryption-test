@@ -1,13 +1,14 @@
-"""Regression tests: the measured-loop retry buffer must be registered in
-sensitive_buffers (the common cleanup list) in encrypt_file.
+"""Regression tests: the measured-loop retry buffer must be covered by the
+common cleanup path in encrypt_file at every moment of its lifetime.
 
-encrypt_file historically wiped the measured-loop retry buffer through two
-ad-hoc memset passes (before the next operation and via an explicit check in
-the finally-block) instead of registering it in sensitive_buffers, unlike
-sign_file. Any new exit path added to the measured loop could leave the
-ciphertext-bearing retry buffer unwiped (the failure mode of commits 2c45d37
-and a989316). Now the buffer is appended to sensitive_buffers immediately, so
-the single finally-block cleanup loop covers it on every outcome.
+The retry buffer is registered in sensitive_buffers immediately after it is
+produced, so the finally-block wipes it on every exit path while it is live.
+Once the next iteration wipes it proactively (before the following PKCS#11
+call), it no longer holds sensitive data and is REMOVED from the list: the
+list must not retain up to `count` ciphertext buffers until the function
+exits (gigabytes with a module that always answers CKR_BUFFER_TOO_SMALL).
+Invariant: a retry buffer is always either registered in sensitive_buffers
+(covered by the finally-loop) or already wiped and released.
 
 Buffer sizes are unique per run (plaintext=140, encrypted=172, retry=4096,
 preview=148), so memset log entries identify each buffer.
@@ -121,11 +122,12 @@ class EncryptRetryCleanupMembershipTests(unittest.TestCase):
             "retry buffer was not wiped by the common sensitive_buffers loop",
         )
 
-    def test_retry_buffer_wiped_before_next_operation_and_in_finally(self):
+    def test_retry_buffer_wiped_before_next_operation_and_released(self):
         # Multi-operation success sequence: warmup(1) + measured(2), retry on
         # the first measured operation. The retry buffer must be wiped before
-        # the next C_Encrypt starts AND again by the finally-block cleanup
-        # (registered in sensitive_buffers), so nothing survives the run.
+        # the next C_Encrypt starts and then RELEASED (removed from
+        # sensitive_buffers): it no longer holds sensitive data, and the list
+        # must not retain it until the finally-block (exactly one wipe).
         calls, state = [], {}
         funcs, memsets = encrypt_funcs(
             calls,
@@ -143,15 +145,17 @@ class EncryptRetryCleanupMembershipTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(preview_line), b"\xC1" * self.cipher_len)
 
         retry_wipes = self._wipes(memsets, 4096)
-        self.assertGreaterEqual(
-            len(retry_wipes), 2,
-            "retry buffer must be wiped before the next operation and in the finally-block",
+        self.assertEqual(
+            len(retry_wipes), 1,
+            "superseded retry buffer must be wiped before the next operation "
+            "and released, not retained until the finally-block",
         )
 
     def test_retry_buffer_wiped_when_next_operation_fails(self):
         # Negative case: retry on measured op 1, then C_EncryptInit of op 2
-        # fails. The retry buffer must still be wiped twice (early pass and
-        # finally via the common list) and the error must propagate.
+        # fails. The retry buffer must be wiped (pre-emptively, before the
+        # failing operation) exactly once and released; the error must
+        # propagate.
         calls, state = [], {}
         funcs, memsets = encrypt_funcs(
             calls,
@@ -174,9 +178,9 @@ class EncryptRetryCleanupMembershipTests(unittest.TestCase):
         self.assertNotIsInstance(error, app.SelfCheckError)
         self.assertIn("C_EncryptInit", str(error))
         retry_wipes = self._wipes(memsets, 4096)
-        self.assertGreaterEqual(
-            len(retry_wipes), 2,
-            "retry buffer must be wiped even when the next operation fails",
+        self.assertEqual(
+            len(retry_wipes), 1,
+            "retry buffer must be wiped before the failing operation and released",
         )
 
 

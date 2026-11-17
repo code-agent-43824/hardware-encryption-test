@@ -148,9 +148,8 @@ class EncryptRetrySingleWipePathTests(unittest.TestCase):
     def test_mid_sequence_retry_buffer_wiped_exactly_once_total(self):
         # Multi-step: retry on measured op 1, success on op 2 (last). The
         # retry buffer must be wiped once before the next operation starts
-        # and NOT wiped a second time by the finally-block: it is registered
-        # in sensitive_buffers, but the proactive pre-operation wipe already
-        # cleared it, so the common loop must be the only other touch.
+        # and then RELEASED (removed from sensitive_buffers): it no longer
+        # holds sensitive data, so the finally-block must not touch it again.
         calls, state = [], {}
         funcs, memsets = encrypt_funcs(
             calls,
@@ -165,8 +164,8 @@ class EncryptRetrySingleWipePathTests(unittest.TestCase):
         self.assertIn("Самопроверка расшифрованием: успешно", out)
         retry_wipes = self._wipes(memsets, 4096)
         self.assertEqual(
-            len(retry_wipes), 2,
-            "mid-sequence retry buffer: pre-operation wipe + common finally wipe, nothing else",
+            len(retry_wipes), 1,
+            "mid-sequence retry buffer: pre-operation wipe, then released — nothing else",
         )
         self.assertEqual(len(destroys), 1)
 

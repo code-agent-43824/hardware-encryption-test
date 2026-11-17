@@ -1533,6 +1533,11 @@ def encrypt_file(session, funcs, slot_id):
                 # операции: иначе при падении C_EncryptInit/C_Encrypt буфер с
                 # чувствительным шифротекстом остался бы незатёртым до finally.
                 ctypes.memset(retry_buffer, 0, len(retry_buffer))
+                # Буфер уже затёрт и больше не содержит чувствительных данных:
+                # снимаем его с учёта, чтобы sensitive_buffers не удерживал до
+                # count шифротекстов одновременно — память освобождается сразу,
+                # а не в finally (при повторяющихся retry это гигабайты).
+                sensitive_buffers.remove(retry_buffer)
                 retry_buffer = None
             encrypted_len, operation_elapsed, output_buffer = encrypt_with_generated_key(
                 session,
@@ -1749,6 +1754,11 @@ def sign_file(session, funcs):
                 # модуля в C_SignInit/C_Sign подпись оставалась бы в памяти
                 # незатёртой до finally (тот же порядок, что в encrypt_file).
                 ctypes.memset(previous_retry_buffer, 0, len(previous_retry_buffer))
+                # Буфер уже затёрт и больше не содержит чувствительных данных:
+                # снимаем его с учёта, чтобы sensitive_buffers не удерживал до
+                # count подписей одновременно — память освобождается сразу,
+                # а не в finally (как в encrypt_file).
+                sensitive_buffers.remove(previous_retry_buffer)
                 previous_retry_buffer = None
             operation_elapsed, signature_length, retry_buffer = sign_once(
                 session,
