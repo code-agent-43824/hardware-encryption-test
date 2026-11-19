@@ -1597,10 +1597,20 @@ def encrypt_file(session, funcs, slot_id):
             raise SelfCheckError(f"Самопроверка расшифрования не пройдена: {error}") from error
     finally:
         cleanup_error = None
-        if key_handle:
-            rv = funcs["C_DestroyObject"](session, key_handle)
-            if rv != CKR_OK:
-                cleanup_error = PKCS11Error("C_DestroyObject(secret encryption key)", rv)
+        # C_DestroyObject объявлен как возвращающий CK_RV, но реальный
+        # биндинг/обёртка funcs может бросить Python-исключение вместо
+        # возврата кода. Если не перехватить его здесь, finally прервётся
+        # ДО цикла затирания: открытый текст и шифротекст останутся
+        # незатёртыми в памяти, а исходное исключение будет потеряно.
+        try:
+            if key_handle:
+                rv = funcs["C_DestroyObject"](session, key_handle)
+                if rv != CKR_OK:
+                    cleanup_error = PKCS11Error("C_DestroyObject(secret encryption key)", rv)
+        except BaseException as error:
+            cleanup_error = PKCS11Error(
+                f"C_DestroyObject(secret encryption key): {error.__class__.__name__}: {error}"
+            )
         # Затираем буферы до любого raise: прерывание finally раньше memset
         # оставляло бы открытый текст и шифротекст в памяти незатёртыми.
         # Retry-буфер регистрируется в sensitive_buffers сразу после получения,
