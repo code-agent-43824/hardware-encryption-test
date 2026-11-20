@@ -2064,10 +2064,23 @@ def run_with_session(funcs, slot_id, action, *, rw=False, login_required=False):
                 logout(funcs, session)
             except PKCS11Error as error:
                 cleanup_errors.append(error)
+            except BaseException as error:
+                # Биндинг/обёртка funcs может бросить Python-исключение вместо
+                # возврата кода (тот же класс отказа, от которого encrypt_file
+                # защищается в своём finally). Без перехвата выполнение finally
+                # прерывалось бы до C_CloseSession — сессия утекала, а исходная
+                # ошибка действия маскировалась исключением очистки.
+                cleanup_errors.append(
+                    PKCS11Error(f"C_Logout: {error.__class__.__name__}: {error}")
+                )
         try:
             close_session(funcs, session)
         except PKCS11Error as error:
             cleanup_errors.append(error)
+        except BaseException as error:
+            cleanup_errors.append(
+                PKCS11Error(f"C_CloseSession: {error.__class__.__name__}: {error}")
+            )
         if cleanup_errors:
             if operation_failed:
                 for error in cleanup_errors:
