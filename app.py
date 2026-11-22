@@ -716,9 +716,20 @@ def find_objects(session, funcs, template_items, limit=32):
         return objects
     finally:
         operation_failed = sys.exc_info()[0] is not None
-        rv = funcs["C_FindObjectsFinal"](session)
-        if rv != CKR_OK:
-            cleanup_error = PKCS11Error("C_FindObjectsFinal", rv)
+        # Биндинг/обёртка funcs может бросить Python-исключение вместо
+        # возврата кода (тот же класс отказа, от которого encrypt_file
+        # защищается в своём finally, а run_with_session — при logout/
+        # close_session). Без перехвата сырое исключение заменяло бы
+        # исходную ошибку C_FindObjects и выпадало из run_menu как
+        # «неожиданная ошибка» вместо диагностируемой ошибки очистки.
+        try:
+            rv = funcs["C_FindObjectsFinal"](session)
+            cleanup_error = PKCS11Error("C_FindObjectsFinal", rv) if rv != CKR_OK else None
+        except BaseException as error:
+            cleanup_error = PKCS11Error(
+                f"C_FindObjectsFinal: {error.__class__.__name__}: {error}"
+            )
+        if cleanup_error is not None:
             if operation_failed:
                 print(f"Предупреждение при очистке после исходной ошибки: {cleanup_error}", file=sys.stderr)
             else:
