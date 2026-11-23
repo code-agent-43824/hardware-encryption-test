@@ -11,8 +11,10 @@ After the fix:
 - a too-large pulPlaintextLen reported by C_Decrypt during the encryption
   self-check raises InvalidModuleLengthError (not SelfCheckError), with no
   "Самопроверка расшифрования: НЕ УСПЕШНО" stderr line;
-- a too-large pulDigestLen reported by C_Digest during the signature
-  self-check raises InvalidModuleLengthError (not SelfCheckError);
+- on the signature side the same module-length violations are raised directly
+  by sign_file (ulSignatureLen checks) and must not be re-labeled either —
+  covered by test_sign_length_validation; a failing C_Verify self-check
+  remains a genuine SelfCheckError — covered by SignSelfCheckFailureTests;
 - in both cases all sensitive buffers are still wiped and the temporary
   encryption key is destroyed exactly once (multi-operation sequences,
   including a CKR_BUFFER_TOO_SMALL retry, are exercised);
@@ -113,10 +115,14 @@ class EncryptSelfCheckModuleLengthTests(unittest.TestCase):
         self.assertEqual(len(destroys), 1)
 
 
-class SignSelfCheckModuleLengthTests(unittest.TestCase):
-    """GOST R 34.10-2012(256) pair: verify_signature hashes the data first, so
-    a lying pulDigestLen from C_Digest raises InvalidModuleLengthError inside
-    verify_signature — sign_file must not re-label it as SelfCheckError."""
+class SignSelfCheckFailureTests(unittest.TestCase):
+    """GOST R 34.10-2012(256) pair through sign_file: the self-check verifies
+    the signature with the same combined hash+sign mechanism (with the OID
+    parameter) the signing path uses — no separate C_Digest step. A C_Verify
+    failure (e.g. CKR_SIGNATURE_INVALID from a faulty or substituted module)
+    is a genuine self-check failure and must be re-labeled as SelfCheckError
+    with the stderr diagnostic. Module-length violations raised by sign_file
+    itself must NOT be re-labeled — covered by test_sign_length_validation."""
 
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -126,7 +132,7 @@ class SignSelfCheckModuleLengthTests(unittest.TestCase):
     def tearDown(self):
         self.tmpdir.cleanup()
 
-    def gost_funcs(self, calls, digest_len_override):
+    def gost_funcs(self, calls, verify_result):
         def ulong_bytes(v):
             return bytes(app.CK_ULONG(v))
 
@@ -178,13 +184,10 @@ class SignSelfCheckModuleLengthTests(unittest.TestCase):
             ol[0] = app.CK_ULONG(64)
             return app.CKR_OK
 
-        def digest(session, data, data_len, out_digest, out_len):
-            digest_addr = ctypes.cast(out_digest, ctypes.c_void_p).value
-            calls.append(("digest", digest_addr))
-            ctypes.memmove(out_digest, b"\xD1" * 32, 32)
-            ol = ctypes.cast(out_len, ctypes.POINTER(app.CK_ULONG))
-            ol[0] = app.CK_ULONG(digest_len_override)
-            return app.CKR_OK
+        def verify(session, data, data_len, sig, sig_len):
+            addr = ctypes.cast(sig, ctypes.c_void_p).value
+            calls.append(("verify", addr))
+            return verify_result
 
         return {
             "C_FindObjectsInit": find_init,
@@ -194,19 +197,17 @@ class SignSelfCheckModuleLengthTests(unittest.TestCase):
             "C_SignInit": lambda *_: app.CKR_OK,
             "C_Sign": sign,
             "C_VerifyInit": lambda *_: app.CKR_OK,
-            "C_Verify": lambda *a: app.CKR_OK,
-            "C_DigestInit": lambda *_: app.CKR_OK,
-            "C_Digest": digest,
+            "C_Verify": verify,
             "C_DestroyObject": lambda *_: app.CKR_OK,
         }
 
-    def run_sign(self, digest_len_override, count=2, warmup=1):
+    def run_sign(self, verify_result, count=2, warmup=1):
         calls = []
         memsets = []
         inputs = iter([str(self.path), str(count), str(warmup), ""])
         out, err = io.StringIO(), io.StringIO()
         error = None
-        funcs = self.gost_funcs(calls, digest_len_override)
+        funcs = self.gost_funcs(calls, verify_result)
         with mock.patch.object(ctypes, "memset", logging_memset_factory(memsets)), \
              mock.patch("builtins.input", lambda *a: next(inputs)), \
              redirect_stdout(out), redirect_stderr(err):
@@ -216,30 +217,24 @@ class SignSelfCheckModuleLengthTests(unittest.TestCase):
                 error = exc
         return calls, memsets, out.getvalue(), err.getvalue(), error
 
-    def test_lying_digest_length_propagates_as_module_length_error(self):
-        # Multi-operation sequence (warmup + 2 measured signs), then the
-        # self-check digest reports 33 bytes into a 32-byte buffer.
-        calls, memsets, out, err, error = self.run_sign(33)
-        self.assertIsInstance(error, app.InvalidModuleLengthError)
-        self.assertNotIsInstance(error, app.SelfCheckError)
-        self.assertIn("некорректную длину дайджеста", str(error))
-        # No self-check failure stderr line: not a self-check failure.
-        self.assertNotIn("Самопроверка подписи", err)
-
-    def test_lying_digest_length_cleanup(self):
-        calls, memsets, out, err, error = self.run_sign(33)
-        self.assertIsInstance(error, app.InvalidModuleLengthError)
+    def test_invalid_signature_raises_selfcheck_error(self):
+        # A C_Verify failure during the self-check is a genuine self-check
+        # failure: re-labeled as SelfCheckError with the stderr diagnostic.
+        calls, memsets, out, err, error = self.run_sign(app.CKR_SIGNATURE_INVALID)
+        self.assertIsInstance(error, app.SelfCheckError)
+        self.assertNotIsInstance(error, app.InvalidModuleLengthError)
+        self.assertIn("НЕ УСПЕШНО", err)
         sign_calls = [c for c in calls if c[0] == "sign"]
-        digest_calls = [c for c in calls if c[0] == "digest"]
+        verify_calls = [c for c in calls if c[0] == "verify"]
         self.assertEqual(len(sign_calls), 3)  # warmup + 2 measured
-        self.assertEqual(len(digest_calls), 1)  # verify aborted at the digest
-        # All signature output buffers and the digest buffer were wiped.
-        for _, addr in sign_calls + digest_calls:
-            self.assertIn(addr, memsets, f"buffer at {addr} was never wiped")
+        self.assertEqual(len(verify_calls), 1)  # exactly one self-check
+        # All signature output buffers were wiped.
+        for _, addr in sign_calls:
+            self.assertIn(addr, memsets, f"signature buffer at {addr} was never wiped")
 
-    def test_correct_digest_still_signs_successfully(self):
-        # Control: honest module (32-byte digest) → full success path.
-        calls, memsets, out, err, error = self.run_sign(32)
+    def test_honest_verify_signs_successfully(self):
+        # Control: honest module (C_Verify returns CKR_OK) → full success path.
+        calls, memsets, out, err, error = self.run_sign(app.CKR_OK)
         self.assertIsNone(error)
         self.assertIn("Самопроверка подписи: успешно", out)
         sign_calls = [c for c in calls if c[0] == "sign"]

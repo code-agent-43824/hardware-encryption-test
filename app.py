@@ -1339,8 +1339,8 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
     # для всех поддерживаемых механизмов проверки, как нулевой ulSignatureLen
     # в sign_once/sign_file. Без проверки C_Verify получил бы пустую подпись,
     # а сбой или подмена модуля маскировались бы под безликий провал
-    # самопроверки. Отвергаем до любого использования (до C_DigestInit/
-    # C_VerifyInit): тот же контракт «0 или завышенная длина до использования»,
+    # самопроверки. Отвергаем до любого использования (до C_VerifyInit):
+    # тот же контракт «0 или завышенная длина до использования»,
     # что и в остальных ветках; завышенную длину до вызова отвергает
     # валидация ёмкости буфера в sign_file.
     if len(signature_bytes) == 0:
@@ -1350,57 +1350,22 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
     verify_data = data_buffer
     verify_data_size = data_size
     signature = None
-    digest = None
     try:
-        digest_mechanism_type = info.get("digest_mechanism")
-        if digest_mechanism_type is not None:
-            # OID параметров хеша обязателен для GOST-механизмов на Rutoken ECP:
-            # передаём тот же OID, что и в объединённом механизме подписи
-            # (signing_mechanism_for_pair использует info["sign_params"]).
-            # Без параметра C_DigestInit на модуле, проверяющем параметр
-            # механизма, падает — и самопроверка корректной ГОСТ-подписи
-            # не выполняется.
-            digest_mechanism, digest_params_keepalive = mechanism_with_optional_param(
-                digest_mechanism_type, info.get("sign_params"),
-            )
-            rv = funcs["C_DigestInit"](session, ctypes.byref(digest_mechanism))
-            rv_ok(rv, "C_DigestInit(self-check)")
-            digest = (CK_BYTE * info["digest_size"])()
-            digest_len = CK_ULONG(info["digest_size"])
-            rv = funcs["C_Digest"](
-                session,
-                data_buffer,
-                CK_ULONG(data_size),
-                ctypes.cast(digest, CK_BYTE_PTR),
-                ctypes.byref(digest_len),
-            )
-            rv_ok(rv, "C_Digest(self-check)")
-            # pulDigestLen возвращает недоверенный модуль: при сбое или подмене
-            # он может сообщить длину дайджеста больше ёмкости буфера. Тогда
-            # C_Verify получил бы завышенную длину и читал бы за границей
-            # буфера дайджеста (нативное чтение соседней памяти кучи внутри
-            # модуля), поэтому длину проверяем до любого использования.
-            digest_capacity = info["digest_size"]
-            digest_length = int(digest_len.value)
-            if digest_length == 0:
-                # Нулевая длина дайджеста при CKR_OK тоже нарушает контракт
-                # PKCS#11 (как нулевая ulSignatureLen в sign_file/sign_once):
-                # без проверки пустой дайджест ушёл бы в C_Verify, а сбой или
-                # подмена модуля маскировались бы под рядовый провал
-                # самопроверки — тот же контракт «0 или завышенная длина до
-                # использования», что и в остальных ветках.
-                raise InvalidModuleLengthError(
-                    f"Модуль вернул некорректную длину дайджеста: 0 "
-                    f"(ёмкость буфера {digest_capacity})"
-                )
-            if digest_length > digest_capacity:
-                raise InvalidModuleLengthError(
-                    f"Модуль вернул некорректную длину дайджеста: "
-                    f"{int(digest_len.value)} > ёмкости буфера {digest_capacity}"
-                )
-            verify_data = digest
-            verify_data_size = int(digest_len.value)
-        verify_mechanism = CK_MECHANISM(info["verify_mechanism"], None, CK_ULONG(0))
+        # ГОСТ: подпись проверяем тем же совместным механизмом хеширования и
+        # подписи с OID-параметром, что использует подпись
+        # (signing_mechanism_for_pair, info["sign_mechanism"]/["sign_params"]).
+        # C_VerifyInit с параметровым CKM_GOSTR3410/CKM_GOSTR3410_512
+        # отклоняется SoftHSM-форком (CKR_MECHANISM_INVALID, см. revert
+        # b698efc), а CKM_GOSTR3410/CKM_GOSTR3410_512 без OID-параметра не
+        # проходит на модулях, валидирующих параметр механизма (реальный
+        # Rutoken ECP), — обязательная самопроверка корректной ГОСТ-подписи
+        # не выполнялась. Совместный механизм с параметром — единый путь,
+        # подтверждённый и e2e на форке (так выполняется подпись), и
+        # документацией Рутокен ЭЦП; отдельный C_Digest больше не нужен.
+        # RSA: CKM_SHA256_RSA_PKCS над исходными данными, как раньше.
+        verify_mechanism, verify_keepalive = mechanism_with_optional_param(
+            info["sign_mechanism"], info.get("sign_params"),
+        )
 
         if isinstance(signature_bytes, ctypes.Array) and ctypes.sizeof(signature_bytes._type_) == 1:
             # Подпись уже лежит в затираемом ctypes-буфере вызывающего кода
@@ -1423,14 +1388,11 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
         )
         rv_ok(rv, "C_Verify(self-check)")
     finally:
-        # Затираем дайджест открытого текста и копию подписи (если она
-        # создавалась): как и в decrypt_and_check, временные чувствительные
-        # буферы не должны оставаться в heap до GC. Очистка охватывает и
-        # падения C_DigestInit/C_Digest: буферы создаются внутри try.
-        # При проверке на месте копии нет: исходный буфер принадлежит
-        # вызывающему коду и затирается в его finally.
-        if digest is not None:
-            ctypes.memset(digest, 0, len(digest))
+        # Затираем копию подписи, если она создавалась (при проверке на месте
+        # копии нет: исходный буфер принадлежит вызывающему коду и затирается
+        # в его finally). Временных дайджестов больше нет: ГОСТ-подпись
+        # проверяется совместным механизмом над исходными данными.
+        # Очистка охватывает и падения C_VerifyInit: копия создаётся внутри try.
         if signature is not None:
             ctypes.memset(signature, 0, len(signature))
 

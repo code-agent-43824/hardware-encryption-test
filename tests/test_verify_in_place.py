@@ -7,8 +7,8 @@ Contract:
   the input buffer is NOT wiped or modified by verify_signature (it belongs to
   the caller, whose finally wipes it).
 - raw bytes input: previous behavior — a copy is made and wiped in finally.
-- error paths: digest is still wiped; with ctypes input the caller's signature
-  buffer is left untouched.
+- error paths: with ctypes input the caller's signature buffer is left
+  untouched; C_VerifyInit failure must not call C_Verify.
 - sequences: several verify calls in a row reuse the same buffer in place.
 """
 import ctypes
@@ -39,23 +39,6 @@ def rsa_pair(public_handle=7):
     return {"algorithm": app.CKK_RSA, "public": public_handle}
 
 
-def gost_funcs_for_gost_pair(verify_result=app.CKR_OK, captured=None):
-    funcs = make_verify_funcs(verify_result, captured)
-
-    def digest(_session, _data, _size, output, length):
-        n = int(ctypes.cast(length, ctypes.POINTER(app.CK_ULONG)).contents.value)
-        if captured is not None:
-            captured["digest_buffer"] = ctypes.cast(
-                output, ctypes.POINTER(app.CK_BYTE * n)
-            ).contents
-        ctypes.memmove(output, b"D" * n, n)
-        return app.CKR_OK
-
-    funcs["C_DigestInit"] = lambda *_args: app.CKR_OK
-    funcs["C_Digest"] = digest
-    return funcs
-
-
 class VerifySignatureInPlaceTests(unittest.TestCase):
     def test_ctypes_signature_buffer_is_verified_in_place(self):
         # The core regression: before the fix C_Verify received a COPY of the
@@ -73,30 +56,30 @@ class VerifySignatureInPlaceTests(unittest.TestCase):
         self.assertEqual(bytes(signature), b"\xA5" * 256)
 
     def test_ctypes_signature_buffer_untouched_on_invalid_signature(self):
-        # Negative case: CKR_SIGNATURE_INVALID must raise, the digest must be
-        # wiped, and the caller's signature buffer must stay untouched.
+        # Negative case: CKR_SIGNATURE_INVALID must raise, and the caller's
+        # signature buffer must stay untouched (in-place verification: no
+        # copy is created, wiping is the caller's responsibility).
         captured = {}
-        funcs = gost_funcs_for_gost_pair(app.CKR_SIGNATURE_INVALID, captured)
+        funcs = make_verify_funcs(app.CKR_SIGNATURE_INVALID, captured)
         signature = (app.CK_BYTE * 64).from_buffer_copy(b"\x5A" * 64)
         data = (app.CK_BYTE * 8)(*b"testdata")
         with self.assertRaises(app.PKCS11Error):
             app.verify_signature(1, funcs, {"algorithm": app.CKK_GOSTR3410, "public": 9}, data, 8, signature)
         self.assertEqual(bytes(signature), b"\x5A" * 64, "caller's buffer must not be wiped")
-        self.assertEqual(bytes(captured["digest_buffer"]), b"\0" * 32, "digest must be wiped")
+        self.assertEqual(captured["sig_addr"], ctypes.addressof(signature))
 
-    def test_ctypes_signature_buffer_untouched_on_digest_failure(self):
-        # Negative case: C_Digest fails mid-operation; the caller's signature
-        # buffer must not be touched and C_Verify must never be called.
+    def test_verify_init_failure_keeps_caller_buffer_untouched(self):
+        # Negative case: C_VerifyInit fails mid-operation; the caller's
+        # signature buffer must not be touched and C_Verify must never
+        # be called.
         calls = []
 
-        def fail_digest(_session, _data, _size, _output, _length):
-            calls.append("digest")
+        def fail_verify_init(_session, _mech, _key):
+            calls.append("verify_init")
             return 5
 
         funcs = {
-            "C_DigestInit": lambda *_args: app.CKR_OK,
-            "C_Digest": fail_digest,
-            "C_VerifyInit": lambda *_args: calls.append("verify_init"),
+            "C_VerifyInit": fail_verify_init,
             "C_Verify": lambda *_args: calls.append("verify"),
         }
         signature = (app.CK_BYTE * 64).from_buffer_copy(b"\x5A" * 64)
@@ -105,7 +88,7 @@ class VerifySignatureInPlaceTests(unittest.TestCase):
                 1, funcs, {"algorithm": app.CKK_GOSTR3410, "public": 9},
                 (app.CK_BYTE * 4)(*b"data"), 4, signature,
             )
-        self.assertEqual(calls, ["digest"])
+        self.assertEqual(calls, ["verify_init"])
         self.assertEqual(bytes(signature), b"\x5A" * 64)
 
     def test_bytes_signature_still_copied_and_wiped(self):

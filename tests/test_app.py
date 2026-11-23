@@ -70,52 +70,58 @@ class BenchmarkMetricTests(unittest.TestCase):
 
 
 class ReliabilityTests(unittest.TestCase):
-    def test_verify_signature_wipes_digest_and_signature_after_verification(self):
+    def test_verify_signature_wipes_signature_copy_after_verification(self):
+        # Копия подписи (для bytes-входа) затирается в finally при любом
+        # исходе: и при успешной проверке, и при CKR_SIGNATURE_INVALID.
         for verify_result in (app.CKR_OK, app.CKR_SIGNATURE_INVALID):
             with self.subTest(verify_result=verify_result):
                 captured = {}
+                memsets = []
+                orig_memset = ctypes.memset
 
-                def digest(_session, _data, _size, output, _length):
-                    captured["digest"] = ctypes.cast(output, ctypes.POINTER(app.CK_BYTE * 32)).contents
-                    ctypes.memmove(output, b"D" * 32, 32)
-                    return app.CKR_OK
+                def logging_memset(addr, value, size):
+                    memsets.append((ctypes.cast(addr, ctypes.c_void_p).value, app.native_int(size)))
+                    return orig_memset(addr, value, size)
 
-                def verify(_session, digest_data, _digest_size, signature, _signature_size):
-                    self.assertEqual(bytes(ctypes.cast(digest_data, ctypes.POINTER(app.CK_BYTE * 32)).contents), b"D" * 32)
-                    captured["signature"] = ctypes.cast(signature, ctypes.POINTER(app.CK_BYTE * 3)).contents
-                    self.assertEqual(bytes(captured["signature"]), b"SIG")
+                def verify(_session, _data, _data_len, sig, sig_len):
+                    sig_len_value = app.native_int(sig_len)
+                    captured["sig_addr"] = ctypes.cast(sig, ctypes.c_void_p).value
+                    captured["sig_size"] = sig_len_value
+                    ctypes.memmove(sig, b"SIG", min(3, sig_len_value))
                     return verify_result
 
-                funcs = {
-                    "C_DigestInit": lambda *_args: app.CKR_OK,
-                    "C_Digest": digest,
-                    "C_VerifyInit": lambda *_args: app.CKR_OK,
-                    "C_Verify": verify,
-                }
+                funcs = {"C_VerifyInit": lambda *_args: app.CKR_OK, "C_Verify": verify}
+                signature = b"SIG" + b"\x00" * 61
                 data = (app.CK_BYTE * 4)(*b"data")
-                if verify_result == app.CKR_OK:
-                    app.verify_signature(1, funcs, {"algorithm": app.CKK_GOSTR3410, "public": 1}, data, 4, b"SIG")
-                else:
-                    with self.assertRaises(app.PKCS11Error):
-                        app.verify_signature(1, funcs, {"algorithm": app.CKK_GOSTR3410, "public": 1}, data, 4, b"SIG")
-                self.assertEqual(bytes(captured["digest"]), b"\0" * 32)
-                self.assertEqual(bytes(captured["signature"]), b"\0" * 3)
+                with mock.patch.object(ctypes, "memset", logging_memset):
+                    if verify_result == app.CKR_OK:
+                        app.verify_signature(1, funcs, {"algorithm": app.CKK_GOSTR3410, "public": 1}, data, 4, signature)
+                    else:
+                        with self.assertRaises(app.PKCS11Error):
+                            app.verify_signature(1, funcs, {"algorithm": app.CKK_GOSTR3410, "public": 1}, data, 4, signature)
+                wiped = {addr for addr, size in memsets if size == captured["sig_size"]}
+                self.assertIn(captured["sig_addr"], wiped, "signature copy must be wiped")
 
-    def test_verify_signature_wipes_partially_written_digest_on_error(self):
-        captured = {}
+    def test_verify_init_failure_keeps_caller_buffer_untouched(self):
+        memsets = []
+        orig_memset = ctypes.memset
 
-        def fail_digest(_session, _data, _size, output, _length):
-            captured["digest"] = ctypes.cast(output, ctypes.POINTER(app.CK_BYTE * 32)).contents
-            ctypes.memmove(output, b"D" * 32, 32)
-            return 5
+        def logging_memset(addr, value, size):
+            memsets.append((ctypes.cast(addr, ctypes.c_void_p).value, app.native_int(size)))
+            return orig_memset(addr, value, size)
 
-        funcs = {"C_DigestInit": lambda *_args: app.CKR_OK, "C_Digest": fail_digest}
-        with self.assertRaises(app.PKCS11Error):
-            app.verify_signature(
-                1, funcs, {"algorithm": app.CKK_GOSTR3410, "public": 1},
-                (app.CK_BYTE * 4)(*b"data"), 4, b"SIG",
-            )
-        self.assertEqual(bytes(captured["digest"]), b"\0" * 32)
+        funcs = {"C_VerifyInit": lambda *_args: 5, "C_Verify": lambda *_args: self.fail("C_Verify must not be called")}
+        signature = (app.CK_BYTE * 64).from_buffer_copy(b"\x5A" * 64)
+        with mock.patch.object(ctypes, "memset", logging_memset):
+            with self.assertRaises(app.PKCS11Error):
+                app.verify_signature(
+                    1, funcs, {"algorithm": app.CKK_GOSTR3410, "public": 1},
+                    (app.CK_BYTE * 4)(*b"data"), 4, signature,
+                )
+        # ctypes-вход проверяется на месте: копия не создаётся, буфер
+        # вызывающего кода не трогается и не затирается.
+        self.assertEqual(bytes(signature), b"\x5A" * 64)
+        self.assertEqual(memsets, [])
 
     def test_file_is_read_into_wipeable_buffer_without_read_bytes(self):
         class ReadIntoOnly(io.BytesIO):
