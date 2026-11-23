@@ -1400,7 +1400,16 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
                 )
             verify_data = digest
             verify_data_size = int(digest_len.value)
-        verify_mechanism = CK_MECHANISM(info["verify_mechanism"], None, CK_ULONG(0))
+        # OID параметров обязателен и для verify-механизмов ГОСТ на Rutoken ECP:
+        # C_VerifyInit с параметровым CKM_GOSTR3410/CKM_GOSTR3410_512 без
+        # CK_GOSTR3410_PARAMS возвращает CKR_MECHANISM_PARAM_INVALID на модулях,
+        # валидирующих параметр механизма, — самопроверка корректной ГОСТ-подписи
+        # не выполнялась. Передаём те же sign_params, что использует механизм
+        # подписи (signing_mechanism_for_pair); для RSA sign_params отсутствует
+        # и механизм создаётся без параметра, как раньше.
+        verify_mechanism, verify_keepalive = mechanism_with_optional_param(
+            info["verify_mechanism"], info.get("sign_params"),
+        )
 
         if isinstance(signature_bytes, ctypes.Array) and ctypes.sizeof(signature_bytes._type_) == 1:
             # Подпись уже лежит в затираемом ctypes-буфере вызывающего кода
