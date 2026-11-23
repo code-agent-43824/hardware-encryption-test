@@ -26,14 +26,27 @@ class _EventLog:
 
     def __init__(self):
         self.events = []
+        # Addresses of memset wipes grouped by buffer size. Address-based
+        # counting is unreliable across allocators: a freed superseded buffer
+        # can be reallocated at the same address (observed on Windows), which
+        # a per-address counter would report as a double wipe. The release
+        # contract is instead checked via per-size totals.
+        self.memset_addrs_by_size = {}
         self._orig_memset = ctypes.memset
 
     def logging_memset(self, addr, value, size):
-        self.events.append(("memset", ctypes.cast(addr, ctypes.c_void_p).value))
+        normalized = app.native_int(size)
+        address = ctypes.cast(addr, ctypes.c_void_p).value
+        self.events.append(("memset", address))
+        self.memset_addrs_by_size.setdefault(normalized, []).append(address)
         return self._orig_memset(addr, value, size)
 
     def memset_counts(self, addr):
         return sum(1 for kind, a in self.events if kind == "memset" and a == addr)
+
+    def memset_total_for_size(self, size):
+        """Total number of memset wipes on buffers of exactly `size` bytes."""
+        return len(self.memset_addrs_by_size.get(app.native_int(size), []))
 
     def call_indices(self, kind):
         return [i for i, (k, _) in enumerate(self.events) if k == kind]
@@ -91,13 +104,20 @@ class EncryptRetryReleaseTests(unittest.TestCase):
         self.assertEqual(len(addrs), 8)
         main_buffer, retry_addrs = addrs[0], addrs[1::2]
         self.assertEqual(len(set(retry_addrs)), 4, "each retry must use a fresh buffer")
-        # Every output buffer (main + 4 retry buffers) wiped exactly once.
+        # Every output buffer (main + 4 retry buffers) wiped at least once;
+        # the release contract: the 4 retry buffers (4096 bytes each) are
+        # wiped EXACTLY 4 times in total — a retained superseded buffer would
+        # add a second finally-pass wipe (5 total). Counting per size instead
+        # of per address: a freed buffer's address can be reused by a later
+        # allocation (observed on Windows), which a per-address counter would
+        # misreport as a double wipe.
         for addr in set(addrs):
-            self.assertEqual(
-                log.memset_counts(addr), 1,
-                f"buffer {addr} wiped {log.memset_counts(addr)} times: "
-                f"a superseded buffer must be released, not retained",
-            )
+            self.assertGreaterEqual(log.memset_counts(addr), 1)
+        self.assertEqual(
+            log.memset_total_for_size(4096), 4,
+            "retry buffers must be wiped exactly once each: "
+            "a superseded buffer must be released, not retained",
+        )
         # The retry buffer of measured op 2 must be wiped BEFORE the first
         # C_Encrypt call of measured op 3 (pre-emptive wipe, not finally).
         encrypt_idx = log.call_indices("c_encrypt")
@@ -147,11 +167,11 @@ class EncryptRetryReleaseTests(unittest.TestCase):
                 app.encrypt_file(1, funcs, 1)
 
         addrs = [addr for _, addr in calls]
-        retry_w1 = addrs[1]
-        # The superseded retry buffer was wiped before the failing operation
-        # and released: exactly one wipe, no second pass in the finally-block.
-        self.assertEqual(log.memset_counts(retry_w1), 1)
-        # Nothing sensitive stayed unwiped: every written output buffer wiped.
+        # Released, not retained: exactly ONE wipe of the 4096-byte retry
+        # buffer in total (per-size counting is immune to allocator address
+        # reuse; a retained buffer would be wiped twice — pre-emptively and
+        # in the finally-block).
+        self.assertEqual(log.memset_total_for_size(4096), 1)
         for addr in set(addrs):
             self.assertGreaterEqual(log.memset_counts(addr), 1)
         self.assertEqual(len(destroys), 1)
@@ -211,14 +231,21 @@ class SignRetryReleaseTests(unittest.TestCase):
         self.assertEqual(len(addrs), 8)
         main_buffer, retry_addrs = addrs[0], addrs[1::2]
         self.assertEqual(len(set(retry_addrs)), 4, "each retry must use a fresh buffer")
-        # Every output buffer wiped exactly once: superseded buffers released,
-        # only the live last retry buffer is wiped in the finally-block.
+        # Every output buffer wiped at least once; the release contract: the
+        # 4 retry buffers (300 bytes each) plus the final signature copy
+        # (300 bytes) are wiped EXACTLY 5 times in total — a retained
+        # superseded buffer would add a second finally-pass wipe (6 total).
+        # Counting per size instead of per address: a freed buffer's address
+        # can be reused by a later same-size allocation (observed on Windows
+        # for last_signature_bytes), which a per-address counter would
+        # misreport as a double wipe.
         for addr in set(addrs):
-            self.assertEqual(
-                log.memset_counts(addr), 1,
-                f"buffer {addr} wiped {log.memset_counts(addr)} times: "
-                f"a superseded buffer must be released, not retained",
-            )
+            self.assertGreaterEqual(log.memset_counts(addr), 1)
+        self.assertEqual(
+            log.memset_total_for_size(300), 5,
+            "retry buffers must be wiped exactly once each: "
+            "a superseded buffer must be released, not retained",
+        )
         # Pre-emptive wipe ordering: retry of measured op 2 wiped before the
         # first C_Sign call of measured op 3.
         sign_idx = log.call_indices("c_sign")
@@ -250,8 +277,10 @@ class SignRetryReleaseTests(unittest.TestCase):
         log, out, err, error = self._run(funcs, 2, 0, log)
         self.assertIsInstance(error, app.PKCS11Error)
         addrs = [addr for _, addr in calls]
-        retry_w1 = addrs[1]
-        self.assertEqual(log.memset_counts(retry_w1), 1)
+        # Released, not retained: exactly ONE wipe of the 300-byte retry
+        # buffer in total (per-size counting is immune to allocator address
+        # reuse).
+        self.assertEqual(log.memset_total_for_size(300), 1)
         for addr in set(addrs):
             self.assertGreaterEqual(log.memset_counts(addr), 1)
         self.assertEqual(verify_out, [])
