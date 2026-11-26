@@ -1332,7 +1332,12 @@ def verify_signature(session, funcs, pair, data_buffer, data_size, signature_byt
 
     algorithm = pair.get("algorithm")
     info = KEY_TYPES.get(algorithm)
-    if not info or "verify_mechanism" not in info:
+    # Страж проверяет ключ "sign_mechanism": именно он используется ниже
+    # (совместный механизм хеширования и подписи, тот же путь, что у
+    # подписи). Раньше страж проверял "verify_mechanism", оставшийся от
+    # удалённого пути digest+verify, — при расхождении таблицы функция
+    # падала с сырым KeyError вместо диагностируемой PKCS11Error.
+    if not info or "sign_mechanism" not in info:
         raise PKCS11Error(f"Неподдерживаемый тип ключа для проверки подписи: {pair_algorithm_name(algorithm)}")
     # Длину подписи вызывающий код берёт из данных недоверенного модуля
     # (ulSignatureLen): нулевая длина при CKR_OK нарушает контракт PKCS#11
