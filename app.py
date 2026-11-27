@@ -454,7 +454,6 @@ KEY_TYPES = {
         "name": "RSA-2048",
         "sign_mechanism": CKM_SHA256_RSA_PKCS,
         "hash_mode": "SHA-256",
-        "verify_mechanism": CKM_SHA256_RSA_PKCS,
         "signature_size": RSA_MODULUS_BITS // 8,
     },
     CKK_GOSTR3410: {
@@ -463,9 +462,6 @@ KEY_TYPES = {
         "sign_mechanism": CKM_GOSTR3410_WITH_GOSTR3411_12_256,
         "sign_params": GOST_3411_2012_256_PARAMS,
         "hash_mode": "ГОСТ Р 34.11-2012(256), совместный механизм хеширования и подписи",
-        "verify_mechanism": CKM_GOSTR3410,
-        "digest_mechanism": CKM_GOSTR3411_12_256,
-        "digest_size": 32,
         "signature_size": 64,
     },
     CKK_GOSTR3410_512: {
@@ -474,9 +470,6 @@ KEY_TYPES = {
         "sign_mechanism": CKM_GOSTR3410_WITH_GOSTR3411_12_512,
         "sign_params": GOST_3411_2012_512_PARAMS,
         "hash_mode": "ГОСТ Р 34.11-2012(512), совместный механизм хеширования и подписи",
-        "verify_mechanism": CKM_GOSTR3410_512,
-        "digest_mechanism": CKM_GOSTR3411_12_512,
-        "digest_size": 64,
         "signature_size": 128,
     },
     CKK_GOST28147: {"constant": "CKK_GOST28147", "name": "ГОСТ 28147-89"},
