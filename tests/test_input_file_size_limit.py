@@ -130,7 +130,7 @@ class InputFileSizeLimitTests(unittest.TestCase):
         inputs = iter([str(path), "2", "1", ""])  # path, count, warmup, pair choice
         out = io.StringIO()
         with mock.patch("builtins.input", lambda *a: next(inputs)), redirect_stdout(out):
-            app.sign_file(1, funcs)
+            app.sign_file(1, funcs, 1)
         return out.getvalue(), calls
 
     def test_sign_file_oversized_reports_clean_error_without_token_ops(self):

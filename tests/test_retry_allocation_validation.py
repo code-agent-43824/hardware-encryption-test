@@ -42,7 +42,7 @@ def run_sign_file(file_path, count, warmup, steps):
     err = io.StringIO()
     with mock.patch("builtins.input", lambda *a: next(inputs)), \
             redirect_stdout(out), redirect_stderr(err):
-        app.sign_file(1, funcs)
+        app.sign_file(1, funcs, 1)
     return out.getvalue()
 
 
@@ -80,7 +80,7 @@ class SignRetryAllocationValidationTests(unittest.TestCase):
         with mock.patch("builtins.input", side_effect=[str(self.file_path), "1", "1", ""]), \
                 redirect_stdout(out), redirect_stderr(io.StringIO()):
             with self.assertRaises(app.InvalidModuleLengthError) as ctx:
-                app.sign_file(1, sign_pair_funcs([("too_small", huge)], [], []))
+                app.sign_file(1, sign_pair_funcs([("too_small", huge)], [], []), 1)
         self.assertIn(str(huge), str(ctx.exception))
         self.assertNotIn("Неожиданная ошибка", out.getvalue())
 

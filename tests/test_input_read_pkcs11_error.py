@@ -88,11 +88,11 @@ class InputReadPkcs11ErrorTests(unittest.TestCase):
         with mock.patch("builtins.input", lambda *a: next(inputs)), \
                 redirect_stdout(out):
             if open_override is None:
-                app.sign_file(1, funcs)
+                app.sign_file(1, funcs, 1)
             else:
                 with mock.patch("builtins.open", open_override), \
                         mock.patch("ctypes.memset", logging_memset):
-                    app.sign_file(1, funcs)
+                    app.sign_file(1, funcs, 1)
         return out.getvalue()
 
     def growing_open(self, data):

@@ -189,6 +189,16 @@ class SignSelfCheckFailureTests(unittest.TestCase):
             calls.append(("verify", addr))
             return verify_result
 
+        def mechanism_list(slot, ptr, pcount):
+            pc = ctypes.cast(pcount, ctypes.POINTER(app.CK_ULONG))
+            mechs = [app.CKM_GOSTR3410_WITH_GOSTR3411_12_256]
+            if ptr:
+                arr = ctypes.cast(ptr, ctypes.POINTER(app.CK_MECHANISM_TYPE * len(mechs))).contents
+                for i, m in enumerate(mechs):
+                    arr[i] = app.CK_MECHANISM_TYPE(m)
+            pc[0] = app.CK_ULONG(len(mechs))
+            return app.CKR_OK
+
         return {
             "C_FindObjectsInit": find_init,
             "C_FindObjects": find,
@@ -199,6 +209,7 @@ class SignSelfCheckFailureTests(unittest.TestCase):
             "C_VerifyInit": lambda *_: app.CKR_OK,
             "C_Verify": verify,
             "C_DestroyObject": lambda *_: app.CKR_OK,
+            "C_GetMechanismList": mechanism_list,
         }
 
     def run_sign(self, verify_result, count=2, warmup=1):
@@ -212,7 +223,7 @@ class SignSelfCheckFailureTests(unittest.TestCase):
              mock.patch("builtins.input", lambda *a: next(inputs)), \
              redirect_stdout(out), redirect_stderr(err):
             try:
-                app.sign_file(1, funcs)
+                app.sign_file(1, funcs, 1)
             except app.PKCS11Error as exc:
                 error = exc
         return calls, memsets, out.getvalue(), err.getvalue(), error

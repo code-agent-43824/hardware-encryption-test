@@ -86,6 +86,16 @@ def sign_pair_funcs(sign_steps, calls, verify_out):
         verify_out.append(ctypes.string_at(sig, _to_int(sig_len)))
         return app.CKR_OK
 
+    def mechanism_list(slot, ptr, pcount):
+        pc = ctypes.cast(pcount, ctypes.POINTER(app.CK_ULONG))
+        mechs = [app.CKM_SHA256_RSA_PKCS]
+        if ptr:
+            arr = ctypes.cast(ptr, ctypes.POINTER(app.CK_MECHANISM_TYPE * len(mechs))).contents
+            for i, m in enumerate(mechs):
+                arr[i] = app.CK_MECHANISM_TYPE(m)
+        pc[0] = app.CK_ULONG(len(mechs))
+        return app.CKR_OK
+
     return {
         "C_FindObjectsInit": find_init,
         "C_FindObjects": find,
@@ -96,6 +106,7 @@ def sign_pair_funcs(sign_steps, calls, verify_out):
         "C_VerifyInit": lambda *_: app.CKR_OK,
         "C_Verify": verify,
         "C_DestroyObject": lambda *_: app.CKR_OK,
+        "C_GetMechanismList": mechanism_list,
     }
 
 
@@ -190,7 +201,7 @@ class FileInputErrorTests(unittest.TestCase):
         inputs = iter([str(path), "2", "1", ""])  # path, count, warmup, pair choice
         out = io.StringIO()
         with mock.patch("builtins.input", lambda *a: next(inputs)), redirect_stdout(out):
-            app.sign_file(1, funcs)
+            app.sign_file(1, funcs, 1)
         return out.getvalue(), calls
 
     def test_encrypt_file_with_directory_path_prints_clean_message(self):
@@ -248,7 +259,7 @@ class FileInputErrorTests(unittest.TestCase):
         out = io.StringIO()
         with mock.patch.object(Path, "is_file", is_file_once_then_disappear), \
              mock.patch("builtins.input", lambda *a: next(inputs)), redirect_stdout(out):
-            app.sign_file(1, funcs)  # must not raise
+            app.sign_file(1, funcs, 1)  # must not raise
         self.assertIn("Не удалось прочитать файл", out.getvalue())
         self.assertNotIn("Неожиданная ошибка", out.getvalue())
         self.assertEqual([c for c in calls if c[0] == "sign"], [])
@@ -288,7 +299,7 @@ class MultiOperationFlowTests(unittest.TestCase):
         out = io.StringIO()
         with mock.patch.object(ctypes, "memset", logging_memset), \
              mock.patch("builtins.input", lambda *a: next(inputs)), redirect_stdout(out):
-            app.sign_file(1, funcs)
+            app.sign_file(1, funcs, 1)
 
         sign_calls = [c for c in calls if c[0] == "sign"]
         self.assertEqual(len(sign_calls), 4)

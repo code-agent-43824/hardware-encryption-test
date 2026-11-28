@@ -1659,7 +1659,7 @@ def find_pair_menu(session, funcs):
         print_pair(str(index), pair)
 
 
-def sign_file(session, funcs):
+def sign_file(session, funcs, slot_id):
     raw_path = input("Что подписать? ").strip().strip('"')
     file_path = resolve_sample_file_path(raw_path)
     if not file_path.is_file():
@@ -1681,6 +1681,22 @@ def sign_file(session, funcs):
     if not pair.get("public"):
         print("У найденной пары нет открытого ключа, обязательная самопроверка подписи невозможна")
         return
+    # Проверяем поддержку механизма подписи ДО чтения файла и аллокации
+    # буферов (та же диагностика, что в encrypt_file для механизмов
+    # генерации/шифрования): иначе при отсутствии механизма у токена
+    # пользователь получал бы сырую ошибку C_SignInit в середине benchmark,
+    # уже после чтения файла и выделения буферов подписи.
+    algorithm = pair.get("algorithm")
+    algorithm_info = KEY_TYPES.get(algorithm)
+    if not algorithm_info or "sign_mechanism" not in algorithm_info:
+        raise PKCS11Error(f"Неподдерживаемый тип ключа для подписи: {pair_algorithm_name(algorithm)}")
+    sign_mechanism_type = algorithm_info["sign_mechanism"]
+    mechanisms = get_mechanism_list(funcs, slot_id)
+    if sign_mechanism_type not in mechanisms:
+        raise PKCS11Error(
+            f"Токен не поддерживает механизм подписи 0x{sign_mechanism_type:08X} "
+            f"для {algorithm_info['name']}"
+        )
 
     # Читаем файл сразу в затираемый ctypes-буфер: обычные bytes нельзя
     # обнулить, и открытый текст оставался бы в heap до GC.
@@ -2067,7 +2083,7 @@ def run_menu(funcs, slot_id):
         "1": lambda: run_with_session(funcs, slot_id, find_pair_menu),
         "2": lambda: run_with_session(funcs, slot_id, lambda session, api: generate_pair(session, api, slot_id), rw=True, login_required=True),
         "3": lambda: run_with_session(funcs, slot_id, delete_pair, rw=True, login_required=True),
-        "4": lambda: run_with_session(funcs, slot_id, sign_file, rw=True, login_required=True),
+        "4": lambda: run_with_session(funcs, slot_id, lambda session, api: sign_file(session, api, slot_id), rw=True, login_required=True),
         "5": lambda: run_with_session(funcs, slot_id, lambda session, api: encrypt_file(session, api, slot_id), rw=True, login_required=True),
     }
 

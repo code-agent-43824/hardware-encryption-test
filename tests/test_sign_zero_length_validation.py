@@ -74,7 +74,7 @@ class SignZeroLengthValidationTests(unittest.TestCase):
              mock.patch.object(app, "prompt_warmup_count", lambda: warmup_count), \
              redirect_stdout(out), redirect_stderr(err):
             try:
-                app.sign_file(1, funcs)
+                app.sign_file(1, funcs, 1)
             except app.PKCS11Error as exc:
                 error = exc
         return verify_out, memsets, out.getvalue(), err.getvalue(), error

@@ -128,7 +128,7 @@ class SignSelfCheckExitCodeTests(unittest.TestCase):
                 mock.patch.object(app, "prompt_warmup_count", lambda: 1), \
                 redirect_stdout(out), redirect_stderr(err):
             try:
-                app.sign_file(1, funcs)
+                app.sign_file(1, funcs, 1)
                 error = None
             except app.PKCS11Error as exc:
                 error = exc

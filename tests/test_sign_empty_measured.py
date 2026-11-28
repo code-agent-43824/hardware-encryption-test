@@ -50,7 +50,7 @@ class SignFileEmptyMeasuredTests(unittest.TestCase):
              mock.patch.object(app, "prompt_operation_count", lambda action: 0), \
              redirect_stdout(out):
             try:
-                app.sign_file(1, funcs)
+                app.sign_file(1, funcs, 1)
             except BaseException as exc:  # noqa: BLE001 - recorded, re-raised by callers via assert
                 error = exc
         return calls, verify_out, memsets, out.getvalue(), error

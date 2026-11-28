@@ -73,7 +73,7 @@ def run_sign_file(file_path, count, warmup, funcs, memsets):
     with mock.patch("builtins.input", lambda *a: next(inputs)), \
             mock.patch("ctypes.memset", logging_memset), \
             redirect_stdout(out), redirect_stderr(err):
-        app.sign_file(1, funcs)
+        app.sign_file(1, funcs, 1)
     return out.getvalue()
 
 
